@@ -1,0 +1,5 @@
+renderer: NVIDIA GeForce GTX 1080 Ti/PCIe/SSE2 | version: 4.6.0 NVIDIA 560.94
+vsync=1 upload=1 : frame  16.67 ms  (upload 16.63, swap   0.03)  ->  60.0 fps
+vsync=0 upload=1 : frame   1.08 ms  (upload  0.96, swap   0.11)  -> 926.7 fps
+vsync=1 upload=0 : frame  16.66 ms  (upload  0.00, swap  16.63)  ->  60.0 fps
+vsync=0 upload=0 : frame   0.10 ms  (upload  0.00, swap   0.10)  -> 9802.6 fps

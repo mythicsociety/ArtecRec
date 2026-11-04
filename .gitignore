@@ -1,0 +1,11 @@
+# build outputs and staging — sources, scripts and docs only
+stage/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.etl
+*.wpa
+*.jsonl
+*.manifest
+sdk-fps/*.png
