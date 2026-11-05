@@ -96,7 +96,7 @@ static void create(HWND parent, HFONT f, HFONT fb, HFONT fs, const wchar_t* scan
   lSpeed = mk(L"STATIC", L"Scanning speed", SS_LEFT); lSpeedL = mk(L"STATIC", L"1 fps", SS_LEFT, fs); lSpeedR = mk(L"STATIC", L"8 fps", SS_RIGHT, fs); sSpeed = slider(1, 8, 8);
   bAdv = mk(L"BUTTON", L"Advanced  —", BS_PUSHBUTTON | BS_LEFT);
   cHide = mk(L"BUTTON", L"Hide panels during scanning (full-screen view)", BS_AUTOCHECKBOX); SendMessageW(cHide, BM_SETCHECK, BST_CHECKED, 0);
-  lDof = mk(L"STATIC", L"Depth of field", SS_LEFT); lNear = mk(L"STATIC", L"Near (mm): 170", SS_LEFT, fs); sNear = slider(150, 330, 170); lTicks = mk(L"STATIC", L"170            223            276            330", SS_CENTER, fs); lFar = mk(L"STATIC", L"Far (mm): 330", SS_LEFT, fs); sFar = slider(170, 400, 330);   // review F4: within the Space Spider's range
+  lDof = mk(L"STATIC", L"Depth of field", SS_LEFT); lNear = mk(L"STATIC", L"Near (mm): 170", SS_LEFT, fs); sNear = slider(150, 330, 170); lTicks = mk(L"STATIC", L"170            223            276            330", SS_CENTER, fs); lFar = mk(L"STATIC", L"Far (mm): 330", SS_LEFT, fs); sFar = slider(170, 350, 330);   // review F4: within the Space Spider's range
   cMotion = mk(L"BUTTON", L"Motion tolerance   (not in the SDK)", BS_AUTOCHECKBOX); EnableWindow(cMotion, FALSE);
   lName = mk(L"STATIC", L"Scan name", SS_LEFT); eName = mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP);
   lSens = mk(L"STATIC", L"Sensitivity", SS_LEFT); lSensL = mk(L"STATIC", L"Normal", SS_LEFT, fs); lSensR = mk(L"STATIC", L"Extreme", SS_RIGHT, fs); sSens = slider(0, 100, 0);

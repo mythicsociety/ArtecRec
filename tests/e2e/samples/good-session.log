@@ -1,0 +1,26 @@
+09:58:02  ArtecRec by Mythic Society start
+09:58:02  build Nov  8 2026 18:20:11
+09:58:03  scanner 1234567 connected, fps 8.0 max 15.0, texture gain 0.00..24.00
+09:58:03  default texture gain 0.00, shutter 0.20 ms, illumination 0.5000, auto exposure 1, auto white balance 1
+09:58:03  settings loaded from D:\ArtecRec\artecrec.ini (autoAlign 0, tracking 0, speed 8)
+09:58:04  OpenGL: NVIDIA RTX A2000/PCIe/SSE2, vertex buffers yes
+10:01:10  procedure started (preview, texture=1, tracking=geometry+texture, range 170..330, sens 0.00, speed 8, texFreq auto)
+10:02:11  rec fps 7.95 frames 480 regFail 0 lost 0 memGB 3.1
+10:03:11  rec fps 7.98 frames 960 regFail 1 lost 0 memGB 4.4
+10:03:40  tracking lost: ending this scan, searching for position in a new one
+10:03:41  procedure finished 0x00000000, scans added 1, frames 1190, scans in project 1
+10:03:41  procedure started (record, texture=1, tracking=geometry+texture, range 170..330, sens 0.00, speed 8, texFreq auto)
+10:03:42  frame cleaning: removed 4.1% of 59000000 points (bridging triangles, floating patches) in 6.2 s
+10:03:55  surface optimisation (fine registration, geometry) of 1190 frames in 12.9 s
+10:04:20  position search #1 (local resume, scan 1 window 3): FOUND in 1.1 s, ref frames 12, probe frames 12, surface 92% within 6 mm median 0.4 mm (cameras 31 mm apart)
+10:04:41  rec fps 7.90 frames 470 regFail 0 lost 0 memGB 6.0
+10:05:02  procedure finished 0x00000000, scans added 1, frames 640, scans in project 2
+10:05:20  global registration (geometry) of 640 frames in 22.0 s
+10:06:00  procedure started (record, texture=1, tracking=geometry+texture, range 170..330, sens 0.00, speed 8, texFreq auto)
+10:06:40  scanner disconnected
+10:06:41  procedure finished 0x80010104, scans added 1, frames 300, scans in project 3
+10:06:45  scanner reconnected
+10:08:30  save 0x00000000 52.3 s -> D:\Hoysala\Belur\Belur.sproj
+10:08:30  studio names written for 3 scans
+10:09:10  open 0x00000000 14.2 s, scans 3
+10:10:00  ArtecRec exit

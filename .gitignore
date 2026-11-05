@@ -9,3 +9,4 @@ stage/
 *.jsonl
 *.manifest
 sdk-fps/*.png
+tests/bin/

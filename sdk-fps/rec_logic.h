@@ -33,7 +33,9 @@ inline bool iEquals(const std::wstring& a, const std::wstring& b) { if (a.size()
 inline std::wstring saveTarget(const std::wstring& picked) {
   std::wstring stem = stemOf(picked), dir = folderOf(picked);
   if (stem.empty() || dir.empty()) return L"";
-  for (wchar_t c : stem) if (c == L'<' || c == L'>' || c == L':' || c == L'"' || c == L'|' || c == L'?' || c == L'*') return L"";
+  for (wchar_t c : stem) if (c == L'<' || c == L'>' || c == L':' || c == L'"' || c == L'|' || c == L'?' || c == L'*' || c < 32) return L"";
+  { static const wchar_t* reserved[] = {L"CON", L"PRN", L"AUX", L"NUL", L"COM1", L"COM2", L"COM3", L"COM4", L"COM5", L"COM6", L"COM7", L"COM8", L"COM9", L"LPT1", L"LPT2", L"LPT3", L"LPT4", L"LPT5", L"LPT6", L"LPT7", L"LPT8", L"LPT9"};
+    for (auto r : reserved) if (iEquals(stem, r)) return L""; }
   if (iEquals(leafOf(dir), stem)) return dir + L"\\" + stem + L".sproj";   // whole leaf equals the stem, not just its end
   return dir + L"\\" + stem + L"\\" + stem + L".sproj";
 }
@@ -47,7 +49,7 @@ struct FolderEntry { std::wstring name; bool dir; };
 enum SwapVerdict { Swap_New, Swap_Ok, Swap_Foreign, Swap_NotOurs };
 inline bool isProjectFile(const std::wstring& name, const std::wstring& stem) {
   std::wstring n = iEndsWith(name, L".tmp") ? name.substr(0, name.size() - 4) : name;   // a leftover of an interrupted atomic write
-  return iEquals(n, stem + L".sproj") || iEquals(n, L"artecrec-groups.txt") || iEquals(n, L"artecrec-project.txt") || iEquals(n, L"Scans") || iEquals(n, L"Models") || iEquals(n, L"Data") || iEquals(n, L"Thumbnails");
+  return iEquals(n, stem + L".sproj") || iEquals(n, L"artecrec-groups.txt") || iEquals(n, L"artecrec-project.txt") || iEquals(n, L"Scans");   // the SDK saver writes only these; Models etc. are Studio's and block a swap
 }
 // listedOk=false (the folder could not be read) is treated as foreign: never swap what could not be checked.
 inline SwapVerdict canReplaceFolder(bool exists, const std::vector<FolderEntry>& entries, const std::wstring& stem, bool hasMarker, bool openedFromStudioWithOtherEntries, bool listedOk = true) {
@@ -62,7 +64,8 @@ inline SwapVerdict canReplaceFolder(bool exists, const std::vector<FolderEntry>&
 // ---------------------------------------------------------------- names in the .sproj (A5)
 inline std::string utf8(const std::wstring& w) {
   std::string s; for (size_t i = 0; i < w.size(); i++) { unsigned cp = (unsigned)w[i];
-    if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < w.size()) { unsigned lo = (unsigned)w[i + 1]; if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); i++; } }
+    if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < w.size() && (unsigned)w[i + 1] >= 0xDC00 && (unsigned)w[i + 1] <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + ((unsigned)w[i + 1] - 0xDC00); i++; }
+    else if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;   // a lone surrogate is not valid UTF-8: replacement character
     if (cp < 0x80) s += (char)cp; else if (cp < 0x800) { s += (char)(0xC0 | (cp >> 6)); s += (char)(0x80 | (cp & 0x3F)); }
     else if (cp < 0x10000) { s += (char)(0xE0 | (cp >> 12)); s += (char)(0x80 | ((cp >> 6) & 0x3F)); s += (char)(0x80 | (cp & 0x3F)); }
     else { s += (char)(0xF0 | (cp >> 18)); s += (char)(0x80 | ((cp >> 12) & 0x3F)); s += (char)(0x80 | ((cp >> 6) & 0x3F)); s += (char)(0x80 | (cp & 0x3F)); } }
@@ -73,13 +76,17 @@ inline std::string xmlAttr(const std::wstring& w) {
   return s;
 }
 // Rewrites the Name="…" of each <Scan …> element in order. names[i] empty = leave as is. Returns count rewritten.
+inline size_t tagEnd(const std::string& x, size_t from) {   // the '>' that closes the tag starting at `from`, skipping quoted values
+  char q = 0; for (size_t i = from; i < x.size(); i++) { char c = x[i]; if (q) { if (c == q) q = 0; } else if (c == '"' || c == '\'') q = c; else if (c == '>') return i; } return std::string::npos; }
 inline int rewriteScanNames(std::string& xml, const std::vector<std::wstring>& names) {
   size_t pos = 0; int i = 0, n = 0;
-  while (true) { size_t s = xml.find("<Scan ", pos); if (s == std::string::npos) break; size_t end = xml.find('>', s); if (end == std::string::npos) break;
-    size_t nm = xml.find("Name=\"", s); if (nm == std::string::npos || nm > end) { pos = end; i++; continue; }
+  while (true) { size_t s = xml.find("<Scan ", pos); if (s == std::string::npos) break; size_t end = tagEnd(xml, s); if (end == std::string::npos) break;
+    // the Name attribute itself: preceded by whitespace, not "DisplayName=" or "FileName=" (test finding, 5 Nov)
+    size_t nm = std::string::npos; { char q = 0; for (size_t k = s + 5; k + 6 <= end; k++) { char c = xml[k]; if (q) { if (c == q) q = 0; continue; } if (c == '"' || c == '\'') { q = c; continue; } if ((c == ' ' || c == '\t' || c == '\n' || c == '\r') && xml.compare(k + 1, 6, "Name=\"") == 0) { nm = k + 1; break; } } }
+    if (nm == std::string::npos) { pos = end; i++; continue; }
     size_t q = xml.find('"', nm + 6); if (q == std::string::npos || q > end) break;
-    if (i < (int)names.size() && !names[i].empty()) { std::string v = xmlAttr(names[i]); xml.replace(nm + 6, q - nm - 6, v); pos = nm + 6 + v.size(); n++; } else pos = q + 1;
-    i++; }
+    if (i < (int)names.size() && !names[i].empty()) { std::string v = xmlAttr(names[i]); xml.replace(nm + 6, q - nm - 6, v); end = end + v.size() - (q - nm - 6); n++; }
+    pos = end; i++; }
   return n;
 }
 
@@ -91,9 +98,13 @@ inline int rewriteScanNames(std::string& xml, const std::vector<std::wstring>& n
 // field data calibrate it: every join now logs its flatness.
 struct GateResult { bool ok; const char* why; };
 inline GateResult acceptJoin(float share, float medianMm, bool geometryOnly, float flatnessMm) {
+  if (!(share == share) || !(medianMm == medianMm) || !(flatnessMm == flatnessMm)) return {false, "the join could not be measured"};   // NaN
   if (share < 0.30f) return {false, "too little of the new surface lies on the previous pass"};
   if (medianMm > 2.5f) return {false, "the new surface lies too far from the previous pass"};
   if (geometryOnly && flatnessMm < 0.6f) return {false, "the surface is too flat to place the pass by shape alone"};
+  // test finding 5 Nov: on 2 mm carving a half-letter slide still lies within 1.2-1.5 mm of the surface; the real
+  // shape-only joins of 5 Nov all had medians of 0.3-0.8 mm. Shape-only joins must sit within 1.0 mm.
+  if (geometryOnly && medianMm > 1.0f) return {false, "the new surface does not sit closely enough on the previous pass"};
   return {true, ""};
 }
 // RMS distance from the best-fit plane through points (x,y,z triples), by the smallest eigenvalue of the covariance.
@@ -117,6 +128,7 @@ inline float planeRms(const std::vector<float>& p) {
 // ICP result: translation (mm), rotation angle (degrees), share of sampled points matched within 2 mm at the end.
 struct RefineVerdict { bool ok; const char* why; };
 inline RefineVerdict acceptRefine(double movedMm, double rotDeg, double matchedShare) {
+  if (!(movedMm == movedMm) || !(rotDeg == rotDeg) || !(matchedShare == matchedShare)) return {false, "the result could not be measured"};   // NaN
   if (movedMm > 8.0) return {false, "it would move the pass more than 8 mm"};
   if (rotDeg > 2.0) return {false, "it would turn the pass more than 2 degrees"};
   if (matchedShare < 0.10) return {false, "too few points overlap the other passes"};   // share of the whole pass; strips overlap 20-40 %
@@ -137,7 +149,7 @@ inline bool allowed(Action a, int mode, bool busyPost, bool stuck) {
   case A_Countdown: return (mode == M_Idle || mode == M_Preview) && !stuck;
   case A_Preview: return (mode == M_Idle || mode == M_Paused) && !stuck;
   case A_Record: return (mode == M_Idle || mode == M_Preview || mode == M_Record || mode == M_Paused) && !stuck;
-  case A_Close: return mode == M_Idle || mode == M_Busy || stuck;
+  case A_Close: return mode == M_Idle || stuck;   // not while saving or opening
   }
   return false;
 }
@@ -150,7 +162,7 @@ inline bool mayRestartFresh(int consecutiveFreshRestarts, bool userStop, bool re
 // ---------------------------------------------------------------- depth range (F4)
 // Space Spider working range per Artec: about 150-350 mm; Studio's default 170-330 mm.
 inline void clampRange(int& nearMm, int& farMm) {
-  nearMm = std::max(150, std::min(nearMm, 330)); farMm = std::max(170, std::min(farMm, 400)); if (nearMm > farMm - 20) nearMm = farMm - 20;
+  nearMm = std::max(150, std::min(nearMm, 330)); farMm = std::max(170, std::min(farMm, 350)); if (nearMm > farMm - 20) nearMm = farMm - 20;
 }
 
 // ---------------------------------------------------------------- memory (E1)

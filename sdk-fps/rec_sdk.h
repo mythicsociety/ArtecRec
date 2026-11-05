@@ -842,7 +842,7 @@ static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> i
     // a pass recorded meanwhile keeps its capture rate.
     { IScan* src = r ? r : s; IModel* gi = nullptr; createModel(&gi); gi->add(src); IModel* go = nullptr; createModel(&go); auto tg = clk::now();
       alg::GlobalRegistrationSettings gd; gd.scannerType = src->getScannerType(); gd.registrationType = alg::GlobalRegistrationType_Geometry; alg::IAlgorithm* ga = nullptr; ErrorCode eg = alg::createGlobalRegistrationAlgorithm(&ga, &gd);
-      if (eg == ErrorCode_OK && ga) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = gi; ws.out = go; ws.threadsCount = std::max(1u, std::thread::hardware_concurrency() / 2); eg = execLimited(ga, &ws, 60, "global registration"); ga->release(); }
+      if (eg == ErrorCode_OK && ga) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = gi; ws.out = go; ws.threadsCount = std::max(1u, std::thread::hardware_concurrency() / 2); eg = execLimited(ga, &ws, 120, "global registration"); ga->release(); }
       double dg = std::chrono::duration<double>(clk::now() - tg).count();
       if (eg == ErrorCode_OK && go->getSize() > 0 && go->getElement(0) && go->getElement(0)->getSize() == nf) { IScan* g = go->getElement(0); g->addRef(); g->setScanTransformation(src->getScanTransformation()); if (src->getName()) g->setName(src->getName()); if (r) r->release(); r = g; logf("global registration (geometry) of %d frames in %.1f s", nf, dg); }
       else logf("global registration failed 0x%08X in %.1f s; scan kept", (unsigned)eg, dg);
@@ -858,7 +858,7 @@ static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> i
   PostResult* pr = new PostResult(); pr->src = s; pr->res = r ? r : s; ScanRec tmp; tmp.scan = pr->res; buildScanDisplay(tmp); pr->disp = std::move(tmp.disp); memcpy(pr->texAvg, tmp.texAvg, sizeof pr->texAvg); pr->hasTexAvg = tmp.hasTexAvg; tmp.scan = nullptr;
   pr->ref = nf >= 3 ? buildRef(pr->res, 40) : nullptr;
   if (g_featSearch && nf >= 3) pr->feats = buildFeats(pr->res, 40);
-  { std::lock_guard<std::mutex> l(item->m); if (item->abandoned) { if (pr->ref) pr->ref->release(); for (auto& fm : pr->disp) (void)fm; if (pr->res && pr->res != pr->src) pr->res->release(); pr->src->release(); delete pr; return; } item->done = true; g_postGate.leave(); }
+  { std::lock_guard<std::mutex> l(item->m); if (item->abandoned) { if (pr->ref) pr->ref->release(); if (pr->res && pr->res != pr->src) pr->res->release(); pr->src->release(); delete pr; return; } item->done = true; g_postGate.leave(); }
   if (!PostMessageW(g_hwnd, WM_POSTDONE, 0, (LPARAM)pr)) { logf("tidy-up result could not be delivered (window gone)"); }
 }
 // Review C3/A3/E3: the busy count is raised here, on the UI thread, before the thread exists, and lowered by
@@ -867,9 +867,9 @@ static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> i
 static void startPostProcess(IScan* s, bool optimise = true) { s->addRef(); g_postBusy++; g_optimising = true; auto it = std::make_shared<PostItem>(); it->s = s; it->t0 = clk::now(); { std::lock_guard<std::mutex> l(g_itemsMx); g_items.push_back(it); } std::thread(postProcessScan, s, optimise, it).detach(); }
 // UI timer: give up a tidy-up running for more than 4 minutes (the scan stays as recorded). Returns true if one was given up.
 static bool abandonStuckPost() { bool any = false; std::lock_guard<std::mutex> l(g_itemsMx);
-  for (auto it = g_items.begin(); it != g_items.end();) { auto& p = *it; bool drop = false; { std::lock_guard<std::mutex> lk(p->m); if (p->done) drop = true; else if (p->gated && std::chrono::duration<double>(clk::now() - p->t0).count() > 240) { p->abandoned = true; drop = true; any = true; g_postGate.leave(); if (g_postBusy.load() > 0) g_postBusy--; } }
+  for (auto it = g_items.begin(); it != g_items.end();) { auto& p = *it; bool drop = false; { std::lock_guard<std::mutex> lk(p->m); if (p->done) drop = true; else if (p->gated && std::chrono::duration<double>(clk::now() - p->t0).count() > 360) { p->abandoned = true; drop = true; any = true; g_postGate.leave(); if (g_postBusy.load() > 0) g_postBusy--; } }
     if (drop) it = g_items.erase(it); else ++it; }
-  if (any) { logf("a scan's processing did not finish in 4 min: given up, the scan is kept as recorded"); g_optimising = g_postBusy.load() > 0; } return any; }
+  if (any) { logf("a scan's processing did not finish in 6 min: given up, the scan is kept as recorded"); g_optimising = g_postBusy.load() > 0; } return any; }
 static bool postIdle() { return g_postBusy.load() == 0; }
 static bool waitPostProcess(double maxSecs) { auto t0 = clk::now(); while (g_postBusy.load() > 0) { if (std::chrono::duration<double>(clk::now() - t0).count() > maxSecs) return false; MSG m; while (PeekMessageW(&m, nullptr, WM_POSTDONE, WM_POSTDONE, PM_REMOVE)) DispatchMessageW(&m); Sleep(30); } return true; }   // used only where the UI already guarantees idle
 static void rebuildMaster();
@@ -1064,7 +1064,7 @@ static bool openProject(const std::wstring& sproj) {
   use->release(); p->release();
   if (ec != ErrorCode_OK || out->getSize() == 0) { out->release(); g_saveErr = L"The scans could not be loaded. Your current project is unchanged."; return false; }
   clearProject();
-  { std::lock_guard<std::mutex> l(g_scanMx); for (int i = 0; i < out->getSize(); i++) { IScan* s = out->getElement(i); if (!s) continue; ScanRec r; r.scan = s; s->addRef(); r.placed = true; r.name = s->getName() ? s->getName() : (i < (int)names.size() ? names[i] : L"Scan"); countScanStats(r); g_scans.push_back(std::move(r)); } }
+  { std::lock_guard<std::mutex> l(g_scanMx); for (int i = 0; i < out->getSize(); i++) { IScan* s = out->getElement(i); if (!s) continue; ScanRec r; r.scan = s; s->addRef(); r.placed = true; r.name = i < (int)names.size() && !names[i].empty() ? names[i] : (s->getName() ? s->getName() : L"Scan"); r.scan->setName(r.name.c_str()); countScanStats(r); g_scans.push_back(std::move(r)); } }
   for (auto& r : g_scans) startPostProcess(r.scan, false);   // display meshes + search reference in the background (no re-registration of saved scans); at most 3 at once
   out->release(); rebuildMaster(); loadGroups(sproj); g_projPath = sproj; g_dirty = false; g_projForeign = other > 0; return true;
 }

@@ -1,0 +1,15 @@
+11:58:02  ArtecRec by Mythic Society start
+11:58:03  scanner 1234567 connected, fps 8.0 max 15.0, texture gain 0.00..24.00
+12:00:00  procedure started (record, texture=1, tracking=geometry+texture, range 170..330, sens 0.00, speed 8, texFreq auto)
+12:01:00  rec fps 4.10 frames 240 regFail 0 lost 0 memGB 3.0
+12:01:20  scanner disconnected
+12:01:30  Stop did not finish in 8 s (scanner not answering): procedure cancelled
+12:04:30  global registration: no result in 60 s, cancelled; scan kept as it was
+12:05:01  ArtecRec by Mythic Society start
+12:05:02  scanner 1234567 connected, fps 8.0 max 15.0, texture gain 0.00..24.00
+12:06:00  procedure started (record, texture=1, tracking=geometry+texture, range 170..330, sens 0.00, speed 8, texFreq auto)
+12:07:00  rec fps 7.90 frames 480 regFail 0 lost 0 memGB 3.0
+12:09:30  procedure finished 0x00000000, scans added 1, frames 900, scans in project 1
+12:10:00  save 0x80010104 1.0 s -> D:\Hoysala\Belur\Belur.sproj
+12:10:01  could not replace the project folder (error 5); the new copy is in D:\Hoysala\Belur__saving
+12:11:00  ArtecRec exit
