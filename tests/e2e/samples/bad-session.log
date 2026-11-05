@@ -11,5 +11,5 @@
 12:07:00  rec fps 7.90 frames 480 regFail 0 lost 0 memGB 3.0
 12:09:30  procedure finished 0x00000000, scans added 1, frames 900, scans in project 1
 12:10:00  save 0x80010104 1.0 s -> D:\Hoysala\Belur\Belur.sproj
-12:10:01  could not replace the project folder (error 5); the new copy is in D:\Hoysala\Belur__saving
+12:10:01  could not move the old project folder aside (error 5)
 12:11:00  ArtecRec exit

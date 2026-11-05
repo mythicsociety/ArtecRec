@@ -151,7 +151,7 @@ TEST(kannada_names_in_sproj, "A5 D5") {
 TEST(loaded_scan_names_match_sproj, "D5") {
   // The SDK gives every loaded scan its internal name ("Scan 5"); the .sproj entry names are the real ones. rec_sdk.h
   // openProject (fixed 5 Nov) names each scan from its entry first, the SDK name only as a fallback. Same rule here.
-  std::wstring sp = WORK() + L"\saved\Trail14rt\Trail14rt.sproj"; if (!exists(sp)) SKIP("run save_and_reopen_round_trip first");
+  std::wstring sp = WORK() + L"\\saved\\Trail14rt\\Trail14rt.sproj"; if (!exists(sp)) SKIP("run save_and_reopen_round_trip first");
   Loaded B; openProj(sp, B); if (!B.m || B.ec != ErrorCode_OK) SKIP("could not open the saved copy"); int bad = 0, sdkDiffers = 0; std::string ex;
   for (int i = 0; i < std::min(B.m->getSize(), (int)B.entryNames.size()); i++) { const wchar_t* n = B.m->getElement(i)->getName(); std::wstring sdk = n ? n : L"";
     if (sdk != B.entryNames[i]) sdkDiffers++;

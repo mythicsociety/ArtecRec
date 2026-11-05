@@ -117,7 +117,7 @@ static std::wstring iniPath() { wchar_t p[MAX_PATH]; GetModuleFileNameW(nullptr,
 static bool iniLoaded = false;   // a save fired by a control notification during start-up overwrote the file with defaults before it was read (2 Nov)
 static void saveIni() {
   if (!iniLoaded) return; std::wstring f = iniPath(); auto wi = [&](const wchar_t* k, int v) { wchar_t b[32]; swprintf(b, 32, L"%d", v); WritePrivateProfileStringW(L"scan", k, b, f.c_str()); };
-  wi(L"tracking", S.tracking); wi(L"distColor", S.distColor); wi(L"autoAlign", S.autoAlign); wi(L"hidePanel", S.hidePanel); wi(L"speed", S.speed); wi(L"near", (int)S.nearMm.load()); wi(L"far", (int)S.farMm.load());
+  wi(L"iniVersion", 2); wi(L"tracking", S.tracking); wi(L"distColor", S.distColor); wi(L"autoAlign", S.autoAlign); wi(L"hidePanel", S.hidePanel); wi(L"speed", S.speed); wi(L"near", (int)S.nearMm.load()); wi(L"far", (int)S.farMm.load());
   wi(L"sens", (int)(S.sens * 100 + 0.5f)); wi(L"texBright", (int)(S.texBright * 100 + 0.5f)); wi(L"autoBright", S.autoBright); wi(L"recordTexture", S.recordTexture); wi(L"flash", S.flash); wi(L"texFreq", S.texFreq); wi(L"texEvery", S.texEvery);
   wi(L"delay", S.delaySec); wi(L"limitFrames", S.limitFrames); wi(L"frameLimit", S.frameLimit); wi(L"audio", S.audio); wi(L"scanUsingAutoAlign", S.scanUsingAutoAlign); wi(L"shotBg", S.shotBg); wi(L"advOpen", advOpen);
   BOOL ok = WritePrivateProfileStringW(L"scan", L"scanName", S.scanName.c_str(), f.c_str());
@@ -127,7 +127,7 @@ static void saveIni() {
 static void loadIni() {
   std::wstring f = iniPath(); if (GetFileAttributesW(f.c_str()) == INVALID_FILE_ATTRIBUTES) { iniLoaded = true; return; } auto ri = [&](const wchar_t* k, int d) { return (int)GetPrivateProfileIntW(L"scan", k, d, f.c_str()); };
   auto chk = [](HWND h, bool v) { SendMessageW(h, BM_SETCHECK, v ? BST_CHECKED : BST_UNCHECKED, 0); }; auto pos = [](HWND h, int v) { SendMessageW(h, TBM_SETPOS, TRUE, v); };
-  int tr = ri(L"tracking", 0); chk(rGeoTex, tr == 0); chk(rGeo, tr == 1); chk(cDist, ri(L"distColor", 1)); int aa = ri(L"autoAlign", 1); /* review F2: joining new passes is on unless the user switched it off */ chk(cAlign, aa != 0); chk(cHide, ri(L"hidePanel", 1));
+  int tr = ri(L"tracking", 0); chk(rGeoTex, tr == 0); chk(rGeo, tr == 1); chk(cDist, ri(L"distColor", 1)); int iniVer = ri(L"iniVersion", 1); int aa = iniVer >= 2 ? ri(L"autoAlign", 1) : 1;   /* cloud review: builds before 5 Nov stored autoAlign=0 as their default; switch it on once */ /* review F2: joining new passes is on unless the user switched it off */ chk(cAlign, aa != 0); chk(cHide, ri(L"hidePanel", 1));
   pos(sSpeed, ri(L"speed", 8)); pos(sNear, ri(L"near", 170)); pos(sFar, ri(L"far", 330)); pos(sSens, ri(L"sens", 0)); pos(sBright, ri(L"texBright", 0)); chk(cAuto, ri(L"autoBright", 1));
   chk(cNoTex, !ri(L"recordTexture", 1)); chk(cNoFlash, !ri(L"flash", 1)); int tf = ri(L"texFreq", 0); chk(rFreqAuto, tf == 0); chk(rFreqN, tf == 1); wchar_t b[32];
   swprintf(b, 32, L"%d", ri(L"texEvery", 1)); SetWindowTextW(eFreqN, b); swprintf(b, 32, L"%d", ri(L"delay", 0)); SetWindowTextW(eDelay, b); chk(cLimit, ri(L"limitFrames", 0)); swprintf(b, 32, L"%d", ri(L"frameLimit", 2000)); SetWindowTextW(eLimit, b);

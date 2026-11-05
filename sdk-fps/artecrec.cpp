@@ -19,7 +19,7 @@ static bool g_fitOnPost = false, g_capRestart = false, g_capWedged = false; stat
 static void layout(); static clk::time_point g_cdStart; static bool g_firstScan = true;
 // review B5/B4/F1: user Stop during an automatic restart; consecutive fresh restarts; the scanner stopped sending;
 // a save waiting for the tidy-up to finish (and closing after it)
-static bool g_userStop = false, g_stallStop = false, g_limitRestart = false; static int g_freshRestarts = 0; static bool g_pendingSave = false, g_pendingClose = false; static std::wstring g_pendingSavePath;
+static bool g_userStop = false, g_stallStop = false, g_limitRestart = false; static int g_newSinceAlign = 0; /* scans recorded since the last auto-align (cloud review) */ static int g_freshRestarts = 0; static bool g_pendingSave = false, g_pendingClose = false; static std::wstring g_pendingSavePath;
 static HFONT g_font, g_fontB, g_fontSmall; static ULONG_PTR g_gdip;
 
 // ---------------------------------------------------------------- scanning control (Studio: Preview / Record / Pause / Stop, Space toggles)
@@ -34,7 +34,7 @@ static void beginRecordNow() {
   if (m == M_Idle) { if (!startProcedure(ScanningState_Record)) { notice(L"Could not start the scanner. ArtecRec is looking for it again. If this stays, unplug the scanner's power and USB, wait 10 s, plug power then USB."); startReconnect(); return; } g_mode = M_Record; g_recSecs = 0; g_recStart = clk::now(); }
   else if (m == M_Preview && g_proc) { prepareRecording(true); g_proc->setState(ScanningState_Record); g_mode = M_Record; g_recSecs = 0; g_recStart = clk::now(); }
   else if (m == M_Paused && g_proc) { prepareRecording(true); g_proc->setState(ScanningState_Record); g_mode = M_Record; g_recStart = clk::now(); }   // SDK: ContinueRecord unsupported; Resume starts a new scan, as Studio does
-  else return;
+  else { notice(L"Recording could not start now (ArtecRec is busy). Press Record again in a moment."); logf("record request ignored in mode %d", m); return; }
   g_dirty = true; view::follow = true; if (g_scans.empty() && view::dist > 400) view::dist = 320;   // start close enough to see the live surface
   // Keyboard focus goes to the 3D view: hiding a focused panel button leaves no focus window, and hotkeys (Ctrl+S…) were dead after a scan (found 2 Nov T6).
   if (S.hidePanel && !g_fullView) { g_savedPanel = g_showPanel; g_savedWs = g_showWs; g_savedLog = g_showLog; g_showPanel = g_showWs = g_showLog = false; g_fullView = true; layout(); } SetFocus(view::hwnd);
@@ -74,11 +74,16 @@ static bool doSaveNow(const std::wstring& target) {
   ws::showProps(); return ok;
 }
 static bool doSave(bool as, bool closing = false) {
-  if (g_mode.load() == M_Busy) { notice(L"Saving or opening is already running. Wait for it to finish."); return false; }
+  { int m0 = g_mode.load(); if (m0 == M_Busy) { notice(L"Saving or opening is already running. Wait for it to finish."); return false; }
+    if (m0 == M_Preview || m0 == M_Record || m0 == M_Paused || m0 == M_Stopping) { notice(L"Stop the scanner first, then save."); return false; } }   // cloud review: before any dialog
   std::wstring target = g_projPath;
   if (g_projForeign && !as && !target.empty()) { MessageBoxW(g_hwnd, L"This project was opened from Artec Studio and holds models ArtecRec cannot keep.\n\nSave it under a new name, so the Studio project stays as it is.", APP, MB_ICONINFORMATION); as = true; }
   if (as || target.empty()) { std::wstring p = askPath(true); if (p.empty()) return false; target = logic::saveTarget(p);
-    if (target.empty()) { MessageBoxW(g_hwnd, L"That name cannot be used for a project. Use letters, numbers, spaces and dashes.", APP, MB_ICONWARNING); return false; } }
+    if (target.empty()) { MessageBoxW(g_hwnd, L"That name cannot be used for a project. Use letters, numbers, spaces and dashes.", APP, MB_ICONWARNING); return false; }
+    std::wstring tdir = target.substr(0, target.find_last_of(L"\\/"));
+    if (!logic::iEquals(target, g_projPath) && GetFileAttributesW((tdir + L"\\artecrec-project.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
+      std::wstring q = L"A project with this name already exists:\n" + tdir + L"\n\nReplace it with the current project? (The old one is kept as \"" + logic::leafOf(tdir) + L"__previous\" until the next save.)";
+      if (MessageBoxW(g_hwnd, q.c_str(), APP, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return false; g_replaceOk = target; } }
   int m = g_mode.load();
   if (m == M_Busy) { notice(L"Saving or opening is already running. Wait for it to finish."); return false; }   // second review: never queue from Busy (wrong project)
   if (m == M_Preview || m == M_Record || m == M_Paused || m == M_Stopping) { notice(L"Stop the scanner first, then save."); return false; }
@@ -223,7 +228,7 @@ static void onTimer() {
   if (abandonStuckPost()) notice(L"A scan took too long to finish processing; it is kept as recorded. You can save now.");
   if (abandonStuckAlign()) { ws::refresh(); notice(L"Auto-align did not finish. Check the scans and save the project."); }
   // queued work runs once nothing is recording, aligning or being processed (review B2, F1)
-  if (g_mode.load() == M_Idle && postIdle()) {
+  if (g_mode.load() == M_Idle && postIdle() && g_countdown.load() == 0) {   // cloud review: never start queued work under a record countdown
     if (g_pendingAlign) runAutoAlign();
     else if (g_pendingSave) { g_pendingSave = false; std::wstring t = g_pendingSavePath; bool ok = doSaveNow(t); if (g_pendingClose) { g_pendingClose = false; if (ok) { panel::readSettings(); panel::saveIni(); DestroyWindow(g_hwnd); return; } } } }
   { static clk::time_point lastMem = clk::now(); if (std::chrono::duration<double>(clk::now() - lastMem).count() > 30) { lastMem = clk::now(); if (logic::memLevel(freeGB()) != logic::Mem_Ok && (m == M_Idle || m == M_Record)) { std::wstring cur = g_notice.get(); if (cur.empty() || cur.rfind(L"Memory", 0) == 0) notice(L"Memory is getting low. Save the project and start a new one for the next stone."); logf("low memory: %.1f GB free", freeGB()); } } }   // review E1
@@ -235,7 +240,7 @@ static void jobDone(int gen) {
   // capture watchdog: start the capture again, unless the user stopped or the scanner is being reconnected (review B10)
   if (g_capRestart) { g_capRestart = false; onJobDone(); if (!userStop && !g_reconnect) doPreview(); else restorePanels(); return; }
   bool resumeSearch = g_resumeGroupWith >= 0;   // read BEFORE onJobDone, which clears it (bug found 2 Nov T19: no position search after lost tracking)
-  int added = onJobDone(); ws::refresh(); ws::showProps(); if (added) g_capRestarts = 0;
+  int added = onJobDone(); ws::refresh(); ws::showProps(); if (added) g_capRestarts = 0; g_newSinceAlign += added;
   if (added && g_firstScan) { g_fitOnPost = true; g_firstScan = false; }   // fit once the scan's display meshes arrive (WM_POSTDONE)
   if (g_autoRestart) { g_autoRestart = false;
     // review B5: no automatic restart after the user's Stop, a scanner drop, a stalled scanner, or a stuck job
@@ -254,7 +259,8 @@ static void jobDone(int gen) {
   // the user stopped: "added" was 0, so the unplaced pass from the restart chain was never auto-aligned. Look at the
   // newest scan, not at what this last recording added.
   bool newestPlaced = !g_scans.empty() && g_scans.back().placed;
-  if (S.autoAlign && !g_scans.empty() && !newestPlaced) { int vis = 0; for (auto& sc : g_scans) if (sc.visible) vis++; if (vis >= 2) { g_pendingAlign = true; logf("auto-align queued: the newest scan was not placed while scanning"); } }
+  if (S.autoAlign && g_newSinceAlign > 0 && !g_scans.empty() && !newestPlaced) { int vis = 0; for (auto& sc : g_scans) if (sc.visible) vis++; if (vis >= 2) { g_pendingAlign = true; logf("auto-align queued: the newest scan was not placed while scanning"); } }
+  g_newSinceAlign = 0;   // a Preview-and-Stop later does not re-run it
 }
 static LRESULT CALLBACK wndProc(HWND h, UINT u, WPARAM wp, LPARAM lp) {
   switch (u) {

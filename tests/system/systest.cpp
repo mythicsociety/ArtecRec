@@ -221,7 +221,7 @@ TEST(sys_exit_after_save, "B6 A4") {
 }
 TEST(sys_log_failure_signatures, "B1 B3 A1") {
   std::string l = logText(); if (l.empty()) SKIP("no log");
-  for (const char* sig : {"could not replace the project folder", "no result in", "Stop did not finish", "Save failed", "createSaver 0x", "createNewProject 0x"}) CHECK_MSG(!has(l, sig), std::string("log contains: ") + lineWith(l, sig));
+  for (const char* sig : {"could not move the old project folder", "could not move the new project folder", "no result in", "Stop did not finish", "abandoned", "createSaver 0x", "createNewProject 0x"}) CHECK_MSG(!has(l, sig), std::string("log contains: ") + lineWith(l, sig));
   NOTE("log: " + narrow(LOG()) + " (" + std::to_string(countOf(l, "\n")) + " lines)");
 }
 TEST(sys_cleanup, "setup") { killApp(); NOTE("left for inspection: " + narrow(SYS()) + " (delete by hand)"); }

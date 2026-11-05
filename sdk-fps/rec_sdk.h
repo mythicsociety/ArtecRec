@@ -171,6 +171,7 @@ static LockedText g_notice; static void notice(const std::wstring& s) { g_notice
 static bool g_projForeign = false;   // the open project holds Studio entries ArtecRec does not load (review A2)
 static bool g_stuck = false;         // the scanner job was abandoned after a failed Stop/cancel (review B3): save, then restart
 static std::wstring g_saveErr;       // why the last save failed, in plain words (review F6)
+static std::wstring g_replaceOk;     // a target the user confirmed may replace an existing ArtecRec project (cloud review)
 static std::atomic<bool> g_lostNow{false}; static std::atomic<int> g_countdown{0};
 static HWND g_hwnd;
 #define WM_JOBDONE   (WM_APP + 1)
@@ -190,7 +191,7 @@ struct ScanObs : public ScannerObserverBase {
 static ScanObs* g_scanObs;
 
 // live auto-align ("Searching for position"): the first frames of a new scan are matched against the reference scans
-static std::atomic<bool> g_alignLive{false}, g_liveFound{false}, g_searchBusy{false}, g_searchStop{false}; static bool g_segPushedAtPause = false; /* the last Pause/Resume segment was already recorded at Pause (C6) */ static double g_liveT[4][4]; static std::mutex g_liveTmx; static bool g_forceAlign = false;
+static std::atomic<bool> g_alignLive{false}, g_liveFound{false}, g_searchBusy{false}, g_searchStop{false}; static bool g_segPushedAtPause = false; /* the last Pause/Resume segment was already recorded at Pause (C6) */ static std::atomic<int> g_searchGen{0}; static std::atomic<bool> g_searchZombie{false}; /* cloud review: a detached search must not publish; cleaning waits for it too */ static double g_liveT[4][4]; static std::mutex g_liveTmx; static bool g_forceAlign = false;
 static std::atomic<long> g_foundAt{0}, g_storedFrames{0};   // frames captured before the position was found are discarded, as Studio does not record them
 static std::vector<bool> g_frameBad; static std::mutex g_frameBadMx;   // per stored frame: registration failed (Studio records no such frame)
 static IScan* g_tempScan; static IScan* g_tempTex; static std::atomic<int> g_tempCount{0}; static std::mutex g_tempMx; struct AtomicTime { std::atomic<long long> t{0}; void operator=(clk::time_point v) { t = v.time_since_epoch().count(); } operator clk::time_point() const { return clk::time_point(clk::duration(t.load())); } };
@@ -359,7 +360,7 @@ static void prepareRecording(bool recording) {
 }
 // Review B1 (second pass): the UI never joins the search without a bound. Stop it, wait up to 10 s, then let it go.
 static void joinSearchBounded() { g_searchStop = true; for (int i = 0; i < 200 && g_searchBusy.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  if (g_searchThread.joinable()) { if (g_searchBusy.load()) { logf("the position search did not stop in 10 s: left to finish on its own"); g_searchThread.detach(); } else g_searchThread.join(); } g_searchBusy = false; }
+  if (g_searchThread.joinable()) { if (g_searchBusy.load()) { logf("the position search did not stop in 10 s: left to finish on its own (its result is ignored)"); ++g_searchGen; g_searchZombie = true; g_searchThread.detach(); } else g_searchThread.join(); } g_searchBusy = false; }
 // Review C6: one live-search result per recorded segment (Pause/Resume makes one scan per segment).
 static std::vector<logic::SegmentPose> g_segPoses;
 static void pushSegmentPose() { logic::SegmentPose p; p.found = g_alignLive.load() && g_liveFound.load(); { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(p.T, g_liveT, sizeof p.T); } g_segPoses.push_back(p); }
@@ -412,7 +413,7 @@ static bool cancelStuckProcedure() {
   if (!g_cancelSent && since >= 15.0) { g_cancelSent = true; std::lock_guard<std::mutex> l(g_ctsMx); if (g_cts) g_cts->cancel(); logf("Stop did not finish in 15 s (scanner not answering): procedure cancelled"); return false; }
   if (g_cancelSent && since >= 60.0) { logf("the scanning job did not end 45 s after the cancel: abandoned; the scans already recorded can be saved");
     ++g_jobGen; g_job.detach(); g_proc->release(); g_proc = nullptr; if (g_jobOut) { g_jobOut->release(); g_jobOut = nullptr; }
-    g_searchStop = true; if (g_searchThread.joinable()) g_searchThread.detach(); g_searchBusy = false;
+    g_searchStop = true; if (g_searchThread.joinable()) { if (g_searchBusy.load()) { ++g_searchGen; g_searchZombie = true; } g_searchThread.detach(); } g_searchBusy = false;
     { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { g_tempScan->release(); g_tempScan = nullptr; } if (g_tempTex) { g_tempTex->release(); g_tempTex = nullptr; } } g_alignLive = false;
     { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); g_live = FrameMesh(); }
     g_stuck = true; g_mode = M_Idle; return true; }
@@ -547,9 +548,12 @@ static bool hybridResume(const HybridWindow& win, double T[4][4], int& nRef, int
 // accepted only if it lands within 150 mm of that tail. No image-feature search, no RANSAC tiers — on a repeating
 // inscription those landed one letter row off (Trail12: 10–21 mm; feattest: 113–193 mm).
 static bool g_localResume = true;
+// the search thread ends: a current search clears "busy"; a detached (abandoned) one only clears the zombie flag
+static void searchDone(int gen) { if (gen == g_searchGen.load()) g_searchBusy = false; else g_searchZombie = false; }
 static void runPositionSearch() {
+  if (g_searchZombie.load()) return;   // an abandoned search still runs: no second one beside it
   if (g_searchBusy.exchange(true)) return; if (g_searchThread.joinable()) g_searchThread.join();
-  g_searchThread = std::thread([] {
+  int gen = ++g_searchGen; g_searchThread = std::thread([gen] {
     if (g_localResume) { std::vector<HybridWindow> wins = hybridWindows(); bool texReady = false; Matrix4x4D Fin; { std::lock_guard<std::mutex> l(g_tempMx); texReady = g_tempTex && g_tempTex->getSize() >= 3; if (texReady) Fin = g_tempTex->getTransformation(g_tempTex->getSize() - 1); }
       if (texReady && !wins.empty()) { int latest = wins[0].scan; int tried = 0;
         for (size_t a = 0; a < wins.size() && tried < 3; a++) { const HybridWindow& win = wins[a]; if (win.scan != latest) break; tried++;
@@ -569,14 +573,14 @@ static void runPositionSearch() {
           // image scales", in the log since 10:46) and leaves them at the origin, so "found" was a no-op. Hard reject.
           if (share < 0.3f || med > 2.5f) { logf("position search #%d (local resume, window %zu): texture join rejected - probe surface %.0f%% on the window, median %.1f mm", g_searchTries + 1, a + 1, share * 100, med); continue; }
           logf("position search #%d (local resume, scan %d window %zu): FOUND in %.1f s, ref frames %d, probe frames %d, surface %.0f%% within 6 mm median %.1f mm (cameras %.0f mm apart)", ++g_searchTries, win.scan + 1, a + 1, secs, nr, np, share * 100, med, dist);
-          { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
-          g_hybridNext = 0; g_lastSearch = clk::now(); g_searchBusy = false; return; }
+          if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+          g_hybridNext = 0; g_lastSearch = clk::now(); searchDone(gen); return; }
         if (tried) logf("position search #%d (local resume): texture join not found; trying the geometry auto-align against the previous pass", g_searchTries + 1); }
       // geometry auto-align (the method that joined Trail13 after Stop) against the latest visible pass only, then the same surface gate on its tail windows
       IScan* probe = nullptr; { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { createSimilarScan(&probe, g_tempScan); if (probe) cloneScan(probe, g_tempScan); } }
-      if (!probe || probe->getSize() < 6) { if (probe) probe->release(); g_lastSearch = clk::now(); g_searchBusy = false; return; } ensureNormals(probe);
+      if (!probe || probe->getSize() < 6) { if (probe) probe->release(); g_lastSearch = clk::now(); searchDone(gen); return; } ensureNormals(probe);
       IModel* in = nullptr; createModel(&in); { std::lock_guard<std::mutex> l(g_scanMx); for (int i = (int)g_scans.size() - 1; i >= 0; i--) { auto& s = g_scans[i]; if (!(s.visible && s.scan && s.ref && (s.group < 0 || g_groups[s.group].visible))) continue; s.ref->setScanTransformation(s.scan->getScanTransformation()); in->add(s.ref); break; } }
-      int nref = in->getSize(); if (nref == 0) { in->release(); probe->release(); g_lastSearch = clk::now(); g_searchBusy = false; return; } in->add(probe);
+      int nref = in->getSize(); if (nref == 0) { in->release(); probe->release(); g_lastSearch = clk::now(); searchDone(gen); return; } in->add(probe);
       IModel* out = nullptr; createModel(&out); alg::AutoAlignSettings as; as.scannerType = probe->getScannerType(); alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createAutoalignAlgorithm(&a, &as);
       auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(a, &ws, 20, "position search", &g_searchStop); a->release(); }
       bool found = false; double T[4][4];
@@ -588,26 +592,26 @@ static void runPositionSearch() {
         if (wpts.size() >= 300 && ppts.size() >= 60) { flat = logic::planeRms(wpts); feat::Grid g; g.build(std::move(wpts), 2.0f); double I[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, z[3] = {0, 0, 0}; g.check(ppts, I, z, 6.0f, share, med); } }
       logic::GateResult gate = logic::acceptJoin(share, med, true, flat); bool ok = found && gate.ok;   // review D1: geometry-only placement refused on a near-flat window
       logf("position search #%d (local geometry auto-align vs the previous pass): 0x%08X in %.1f s, probe frames %d -> %s (surface %.0f%% within 6 mm, median %.1f mm, window flatness %.1f mm)", ++g_searchTries, (unsigned)ec, secs, probe->getSize(), ok ? "FOUND" : found ? gate.why : "not found", share * 100, med, flat);
-      if (ok) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
-      out->release(); in->release(); probe->release(); g_lastSearch = clk::now(); g_searchBusy = false; return; }
+      if (ok) { if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+      out->release(); in->release(); probe->release(); g_lastSearch = clk::now(); searchDone(gen); return; }
     // 0) image-feature search (FS build): recognise the place the latest textured probe frame shows in any earlier pass
     if (g_featSearch) { double T[4][4]; int inl = 0, matches = 0, refScan = -1, refFrame = -1; double secs = 0;
       if (featureSearch(T, inl, matches, refScan, refFrame, secs)) {
         logf("position search #%d (image features): FOUND in %.1f s, %d inliers of %d matches, scan %d frame %d", ++g_searchTries, secs, inl, matches, refScan + 1, refFrame + 1);
-        { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
-        g_hybridNext = 0; g_lastSearch = clk::now(); g_searchBusy = false; return; }
+        if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+        g_hybridNext = 0; g_lastSearch = clk::now(); searchDone(gen); return; }
       else if (matches >= 0) logf("position search #%d (image features): not found in %.1f s (best %d inliers of %d matches)", g_searchTries + 1, secs, inl, matches); }
     // 1) hybrid resume (texture + geometry): two windows of an earlier pass per try, tail of the latest pass first
     { std::vector<HybridWindow> wins = hybridWindows(); bool texReady = false; { std::lock_guard<std::mutex> l(g_tempMx); texReady = g_tempTex && g_tempTex->getSize() >= 3; }
       if (texReady && !wins.empty()) { for (int a = 0; a < 2 && a < (int)wins.size(); a++) { const HybridWindow& win = wins[(g_hybridNext + a) % wins.size()];
           double T[4][4]; int nr = 0, np = 0; double secs = 0; if (hybridResume(win, T, nr, np, secs)) {
             logf("position search #%d (hybrid resume, scan %d window %d of %d): FOUND in %.1f s, ref frames %d, probe frames %d", ++g_searchTries, win.scan + 1, (g_hybridNext + a) % (int)wins.size() + 1, (int)wins.size(), secs, nr, np);
-            { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
-            g_hybridNext = 0; g_lastSearch = clk::now(); g_searchBusy = false; return; } }
+            if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+            g_hybridNext = 0; g_lastSearch = clk::now(); searchDone(gen); return; } }
         g_hybridNext = (g_hybridNext + 2) % (int)wins.size(); } }
     // 2) geometry-only auto-align (RANSAC) of the probe against the thinned references
     IScan* probe = nullptr; { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { createSimilarScan(&probe, g_tempScan); if (probe) cloneScan(probe, g_tempScan); } }
-    if (!probe || probe->getSize() < 6) { if (probe) probe->release(); g_lastSearch = clk::now(); g_searchBusy = false; return; }
+    if (!probe || probe->getSize() < 6) { if (probe) probe->release(); g_lastSearch = clk::now(); searchDone(gen); return; }
     ensureNormals(probe);
     // References = the prebuilt thinned copies (ScanRec::ref). Tiered for big stones with many scans: the first two
     // tries use the three most recent visible scans (the operator usually resumes near where the last scan ended);
@@ -631,8 +635,8 @@ static void runPositionSearch() {
       invRigid(Rout, Rinv); mul44(Rinv, Rin, tmp); mul44(tmp, Pout, T); bool anyMoved = false; for (int k = 0; k <= nref; k++) if (!isIdentity(out->getElement(k)->getScanTransformation().m)) anyMoved = true; found = anyMoved; }
     logf("position search #%d (%s): 0x%08X in %.1f s, probe frames %d, refs %d -> %s", ++g_searchTries, tier == 1 ? "recent scans" : tier == 2 ? "all scans" : "all scans, 120-frame references", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), probe->getSize(), nref, found ? "FOUND" : "not found");
     for (IScan* t : big) t->release();
-    if (found) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
-    out->release(); in->release(); probe->release(); g_lastSearch = clk::now(); g_searchBusy = false;
+    if (found) { if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+    out->release(); in->release(); probe->release(); g_lastSearch = clk::now(); searchDone(gen);
   });
 }
 
@@ -817,8 +821,8 @@ static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> i
     // publish first, then let a search already in flight finish (it may be reading this scan); if it does not finish in
     // 20 s, skip cleaning rather than rewrite frames under it (review C7)
     { std::lock_guard<std::mutex> l(g_cleanMx); g_cleaning.push_back(s); }
-    int w = 0; for (; w < 400 && g_searchBusy.load(); w++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    if (!g_searchBusy.load()) cleanScan(s); else logf("frame cleaning skipped: the position search is still running");   // cleanScan takes the scan lock only while removing frames (C7)
+    int w = 0; for (; w < 400 && (g_searchBusy.load() || g_searchZombie.load()); w++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (!g_searchBusy.load() && !g_searchZombie.load()) cleanScan(s); else logf("frame cleaning skipped: the position search is still running");   // cleanScan takes the scan lock only while removing frames (C7)
     { std::lock_guard<std::mutex> l(g_cleanMx); g_cleaning.erase(std::remove(g_cleaning.begin(), g_cleaning.end(), s), g_cleaning.end()); } nf = s->getSize();
     // search reference right away (instant clone): after a loss mid-pass the search must compare against THIS scan,
     // not the one before it; the reference used to arrive only after registration + refinement, 10–20 s later
@@ -956,7 +960,7 @@ static void runAutoAlign(bool manual = false) {   // aligns the visible scans to
     }
     out->release(); in->release();
     if (gen == g_alignGen.load()) {   // not abandoned: apply, then rebuild the moved scans' display outside the lock
-      for (auto& mv : moves) { ScanRec tmp; { std::lock_guard<std::mutex> l(g_scanMx); bool still = false; for (auto& r : g_scans) if (r.scan == mv.s) { r.scan->setScanTransformation(mv.T); still = true; } if (!still) continue; }
+      for (auto& mv : moves) { ScanRec tmp; { std::lock_guard<std::mutex> l(g_scanMx); bool still = false; for (auto& r : g_scans) if (r.scan == mv.s) { r.scan->setScanTransformation(mv.T); r.placed = true; still = true; } /* cloud review: aligned = anchor, so a later auto-align does not move it again */ if (!still) continue; }
         tmp.scan = mv.s; buildScanDisplay(tmp); { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.scan == mv.s) { r.disp = std::move(tmp.disp); memcpy(r.texAvg, tmp.texAvg, sizeof r.texAvg); r.hasTexAvg = tmp.hasTexAvg; } } tmp.scan = nullptr; }
       wchar_t m[96]; if (ec == ErrorCode_OK) swprintf(m, 96, L"aligned in %.0f s", secs); else if (ec == ErrorCode_OperationFailed) wcscpy(m, L"could not align the new scan (too little overlap)"); else if (ec == ErrorCode_OperationAborted) wcscpy(m, L"auto-align gave up after 60 s (too little overlap?)"); else swprintf(m, 96, L"align failed (0x%08X)", (unsigned)ec);
       g_alignMsg = std::wstring(m); PostMessageW(g_hwnd, WM_ALIGNDONE, (WPARAM)gen, 0); }
@@ -989,7 +993,7 @@ static void loadGroups(const std::wstring& sproj) {
     if (c.size() >= 3 && c[0] == L"G") { GroupRec g; g.name = c[1]; g.visible = c[2] == L"1"; g_groups.push_back(g); }
     else if (c.size() >= 5 && c[0] == L"S") { int i = _wtoi(c[1].c_str()); if (i >= 0 && i < (int)g_scans.size()) { auto& r = g_scans[i];
         if (c.size() > 8 && r.scan && _wtoi(c[8].c_str()) != r.scan->getSize()) { skipped++; continue; }   // not the same scan: leave its Studio name
-        setScanName(r, c[2]); r.group = _wtoi(c[3].c_str()); r.visible = c[4] == L"1"; if (c.size() > 5) r.keyFrames = _wtoi(c[5].c_str()); if (c.size() > 6) r.maxErr = _wtof(c[6].c_str()); if (c.size() > 7) r.placed = c[7] == L"1"; } } }
+        setScanName(r, c[2]); r.group = _wtoi(c[3].c_str()); r.visible = c[4] == L"1"; if (c.size() > 5) r.keyFrames = _wtoi(c[5].c_str()); if (c.size() > 6) r.maxErr = _wtof(c[6].c_str()); /* loaded scans stay anchors (cloud review); the saved flag is informational */ } } }
   fclose(f); for (auto& r : g_scans) if (r.group >= (int)g_groups.size()) r.group = -1; if (skipped) logf("groups file: %d scan line(s) did not match their scan and were ignored", skipped);
 }
 // The SDK's project writer names scans "Scan 0, 1, ...". Rewrite the Name="..." attributes in the .sproj XML (in scan
@@ -1027,7 +1031,8 @@ static bool saveProject(const std::wstring& sproj) {
   // second review: re-read the project on disk now: Studio may have added models since ArtecRec opened or saved it
   bool foreignNow = g_projForeign && logic::iEquals(sproj, g_projPath); std::wstring onDisk = dir + L"\\" + name;
   if (exists && GetFileAttributesW(onDisk.c_str()) != INVALID_FILE_ATTRIBUTES) { prj::IProject* q = nullptr; if (prj::openProject(&q, onDisk.c_str()) == ErrorCode_OK && q) { int n = q->getEntryCount(); for (int i = 0; i < n; i++) { prj::EntryInfo e; IString* nm = nullptr; if (q->getEntry(i, &e, &nm) == ErrorCode_OK && e.type != prj::EntryType_Scan) foreignNow = true; if (nm) nm->release(); } q->release(); } }
-  bool ours = GetFileAttributesW((dir + L"\\artecrec-project.txt").c_str()) != INVALID_FILE_ATTRIBUTES || (logic::iEquals(sproj, g_projPath) && GetFileAttributesW((dir + L"\\artecrec-groups.txt").c_str()) != INVALID_FILE_ATTRIBUTES);
+  bool marker = GetFileAttributesW((dir + L"\\artecrec-project.txt").c_str()) != INVALID_FILE_ATTRIBUTES, sidecar = GetFileAttributesW((dir + L"\\artecrec-groups.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
+  bool ours = (logic::iEquals(sproj, g_projPath) && (marker || sidecar)) || (marker && logic::iEquals(sproj, g_replaceOk));   // another ArtecRec project of the same name is replaced only after the user said yes
   logic::SwapVerdict v = logic::canReplaceFolder(exists, entries, stem, ours, foreignNow, listed);
   if (v == logic::Swap_Foreign || v == logic::Swap_NotOurs) { g_saveErr = foreignNow ? L"The project in\n" + dir + L"\nnow holds models made in Artec Studio. ArtecRec will not replace it.\n\nUse Save project as... with a new name." : L"The folder\n" + dir + L"\nalready holds other files (or a project ArtecRec did not make). ArtecRec will not replace it.\n\nUse Save project as... with a new name."; logf("save refused: %ls is not this project's own folder", dir.c_str()); return false; }
   bool swap = exists; /* the SDK saver cannot write into an existing folder, even an empty one */ std::wstring outDir = swap ? dir + L"__saving" : dir, outProj = outDir + L"\\" + name;
@@ -1046,7 +1051,7 @@ static bool saveProject(const std::wstring& sproj) {
     if (!MoveFileExW(dir.c_str(), prev.c_str(), 0)) { DWORD e = GetLastError(); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nbut the old folder could not be moved aside (error " + std::to_wstring(e) + L"; is a window open on it?). Close Explorer windows on it and save again."; logf("could not move the old project folder aside (error %lu)", e); return false; }
     if (!MoveFileExW(outDir.c_str(), dir.c_str(), 0)) { DWORD e = GetLastError(); MoveFileExW(prev.c_str(), dir.c_str(), 0); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nand the old project is unchanged (error " + std::to_wstring(e) + L")."; logf("could not move the new project folder in (error %lu)", e); return false; } }
   writeFileAtomic(dir + L"\\artecrec-project.txt", "Saved by ArtecRec. This folder holds one project; ArtecRec may replace it when the project is saved again.\r\n");
-  saveGroups(sproj); writeStudioNames(sproj); g_dirty = false; g_projPath = sproj; g_projForeign = false; return true;
+  saveGroups(sproj); writeStudioNames(sproj); g_dirty = false; g_projPath = sproj; g_projForeign = false; g_replaceOk.clear(); return true;
 }
 static void clearProject() { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); g_projForeign = false; }
 // Review F5/A2/D4: the current project is cleared only after the new one loaded with at least one scan; a Studio project
