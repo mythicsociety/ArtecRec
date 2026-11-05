@@ -227,8 +227,11 @@ static void render(int w, int h, bool forShot) {
     float cur[3] = {0.30f, 0.80f, 0.32f}; if (lost) { cur[0] = 0.9f; cur[1] = 0.2f; cur[2] = 0.15f; }
     glPolygonOffset(-0.6f * drawn - 2, -0.6f * drawn - 2);
     // the current frame only while scanning: after Stop it stayed on screen as a green patch (owner, 5 Nov 10:42)
-    if (scanningNow && !g_live.v.empty()) { bool lit = lighting; lighting = false;   // flat, unlit: the dense green of Studio's live view
-      FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur, false, false); keep.swap(m.col); } else drawMesh(m, cur, false, false); lighting = lit; }
+    // flat, unlit, and drawn OVER the captured frames: during Record those lie at the same depth and the two fought for
+    // the pixels (depth precision at 5 mm–30 m), breaking the green into light speckles (owner, 5 Nov 10:51 — "will
+    // cause visibility issues in daylight"). Depth test off for the current frame only, as Studio overlays it.
+    if (scanningNow && !g_live.v.empty()) { bool lit = lighting; lighting = false; glDisable(GL_DEPTH_TEST);
+      FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur, false, false); keep.swap(m.col); } else drawMesh(m, cur, false, false); lighting = lit; glEnable(GL_DEPTH_TEST); }
     glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); } }
   drawRotCentre(); deleteTrashTextures();
   if (forShot) return;
