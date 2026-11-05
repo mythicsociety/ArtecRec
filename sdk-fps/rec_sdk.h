@@ -368,6 +368,7 @@ static bool g_featSearch = false;   // image-feature position search (the "FS" b
 // Image-feature position search: match the latest textured probe frame against the feature banks of all visible
 // scans, RANSAC a rigid pose from the 3D correspondences, then tighten with the SDK's textured global registration
 // over [the matched frame's textured neighbours + the probe frames]. T = live transform for the new scan.
+struct ScanHold { IScan* p = nullptr; ~ScanHold() { if (p) p->release(); } };   // see the 11:55 note at hybridResume
 static bool featureSearch(double T[4][4], int& inliers, int& matches, int& refScan, int& refFrame, double& secs) {
   inliers = 0; matches = -1; refScan = refFrame = -1; auto t0 = clk::now();
   // probe: the latest 3 textured frames at two image scales, keypoints and sample points in the LAST frame's coordinates
@@ -392,7 +393,7 @@ static bool featureSearch(double T[4][4], int& inliers, int& matches, int& refSc
   double Tw[4][4]; { std::lock_guard<std::mutex> l(g_scanMx); if (bestScan >= (int)g_scans.size() || !g_scans[bestScan].scan) return false; mul44(g_scans[bestScan].scan->getScanTransformation().m, F, Tw); }
   double FinInv[4][4]; invRigid(Fin.m, FinInv); double live[4][4]; mul44(Tw, FinInv, live);
   // refine with the SDK: textured global registration over [textured neighbours of the matched frame + probe frames]
-  IScan* src = nullptr; std::vector<int> win; double ST[4][4]; { std::lock_guard<std::mutex> l(g_scanMx); if (bestScan >= 0 && bestScan < (int)g_scans.size() && g_scans[bestScan].scan) { src = g_scans[bestScan].scan; memcpy(ST, src->getScanTransformation().m, sizeof ST);
+  IScan* src = nullptr; ScanHold hold; std::vector<int> win; double ST[4][4]; { std::lock_guard<std::mutex> l(g_scanMx); if (bestScan >= 0 && bestScan < (int)g_scans.size() && g_scans[bestScan].scan) { src = g_scans[bestScan].scan; src->addRef(); hold.p = src; memcpy(ST, src->getScanTransformation().m, sizeof ST);
       std::vector<int> ti; for (int k = 0; k < src->getSize(); k++) { IFrameMesh* f = src->getElement(k); if (f && f->isTextured()) ti.push_back(k); } int pos = 0; for (int k = 0; k < (int)ti.size(); k++) if (ti[k] == bestFrame) pos = k;
       for (int k = std::max(0, pos - 2); k < (int)ti.size() && k <= pos + 8; k++) win.push_back(ti[k]); } }   // the matched window (5 textured frames from bestFrame) plus margins
   if (src && win.size() >= 3) { IScan* R = nullptr; createSimilarScan(&R, src); if (R) { int nRef = 0;
@@ -434,9 +435,12 @@ static std::vector<HybridWindow> hybridWindows() {
     for (int pos = (int)ti.size() - W; pos >= 0; pos -= STEP) { HybridWindow hw; hw.scan = i; hw.frames.assign(ti.begin() + pos, ti.begin() + pos + W); w.push_back(hw); if (pos == 0) break; if (pos - STEP < 0 && pos > 0) { HybridWindow h0; h0.scan = i; h0.frames.assign(ti.begin(), ti.begin() + W); w.push_back(h0); break; } } }
   return w;
 }
+// 5 Nov 11:55 crash (0xC0000005, call through a null pointer): the search read a scan's pointer under the lock, then
+// used it after unlocking (createSimilarScan, getScannerType) while WM_POSTDONE swapped in the registered scan and
+// released the old one. The search now holds its own reference for as long as it uses the scan.
 static bool hybridResume(const HybridWindow& win, double T[4][4], int& nRef, int& nProbe, double& secs) {
-  nRef = nProbe = 0; secs = 0; IScan* R = nullptr; IScan* src = nullptr; double scanT[4][4]; const std::vector<int>& refIdx = win.frames;
-  { std::lock_guard<std::mutex> l(g_scanMx); if (win.scan < 0 || win.scan >= (int)g_scans.size() || !g_scans[win.scan].scan) return false; src = g_scans[win.scan].scan;
+  nRef = nProbe = 0; secs = 0; IScan* R = nullptr; IScan* src = nullptr; ScanHold hold; double scanT[4][4]; const std::vector<int>& refIdx = win.frames;
+  { std::lock_guard<std::mutex> l(g_scanMx); if (win.scan < 0 || win.scan >= (int)g_scans.size() || !g_scans[win.scan].scan) return false; src = g_scans[win.scan].scan; src->addRef(); hold.p = src;
     if (refIdx.size() < 3) return false; createSimilarScan(&R, src); if (!R) return false;
     for (int k : refIdx) { if (k < src->getSize()) R->add(src->getElement(k), src->getTransformation(k)); } memcpy(scanT, src->getScanTransformation().m, sizeof scanT); if (R->getSize() < 3) { R->release(); return false; } }
   nRef = R->getSize(); std::vector<Matrix4x4D> probeIn;
