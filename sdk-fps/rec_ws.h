@@ -9,6 +9,9 @@ namespace ws {
 static HWND hwnd, list, props, title, ptitle; static HFONT font, fontB; static bool refreshing = false; static int sortCol = -1, sortDir = 0; static LRESULT nres = 0;
 enum { CM_SELALL = 3001, CM_DESELALL, CM_INVERT, CM_GROUP, CM_UNGROUP, CM_RENAME, CM_DUP, CM_SHOW, CM_HIDE, CM_COLOR, CM_DELETE };
 static std::function<void()> onChanged;
+// Review C1: editing the scan list (delete, duplicate, group, rename, sort) only when nothing records, aligns, saves or
+// tidies scans: background work holds scan numbers and objects. Visibility ticks stay allowed, as in Studio.
+static bool editOk() { if (logic::allowed(logic::A_EditScans, g_mode.load(), !postIdle(), g_stuck)) return true; notice(L"Wait until recording and processing have finished, then try again."); return false; }
 #define WM_WSSYNC (WM_APP + 4)
 
 static LPARAM paramAt(int row) { LVITEMW it = {LVIF_PARAM}; it.iItem = row; ListView_GetItem(list, &it); return it.lParam; }
@@ -47,6 +50,7 @@ static void toggleHighlighted() { for (int si : highlightedScans()) g_scans[si].
 static void showHighlighted(bool v) { for (int si : highlightedScans()) g_scans[si].visible = v; refresh(); showProps(); if (onChanged) onChanged(); }
 static void onlyThis(int si) { for (auto& s : g_scans) s.visible = false; if (si >= 0) g_scans[si].visible = true; refresh(); showProps(); if (onChanged) onChanged(); }
 static void deleteSelected(HWND owner) {
+  if (!editOk()) return;
   std::vector<int> v = highlightedScans(); int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); int gi = r >= 0 ? groupAt(r) : -1; if (v.empty() && gi < 0) return;
   wchar_t m[256]; if (v.size() == 1 && gi < 0) swprintf(m, 256, L"Delete \"%s\"?", g_scans[v[0]].name.c_str()); else swprintf(m, 256, L"Delete %d scan(s)?", (int)v.size()); if (MessageBoxW(owner, m, L"ArtecRec", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
   std::sort(v.begin(), v.end()); { std::lock_guard<std::mutex> l(g_scanMx); for (int k = (int)v.size() - 1; k >= 0; k--) { if (g_scans[v[k]].scan) g_scans[v[k]].scan->release(); if (g_scans[v[k]].ref) g_scans[v[k]].ref->release(); g_scans.erase(g_scans.begin() + v[k]); }
@@ -54,26 +58,28 @@ static void deleteSelected(HWND owner) {
   view::selectedScan = -1; changed();
 }
 static void groupSelected(HWND owner) {   // Studio: select required objects → Group
+  if (!editOk()) return;
   std::vector<int> v = highlightedScans(); if (v.empty()) { MessageBoxW(owner, L"Highlight the scans to group first (click names, Ctrl+click for several).", L"ArtecRec", MB_ICONINFORMATION); return; }
-  GroupRec g; wchar_t nm[64]; swprintf(nm, 64, L"Group %d", (int)g_groups.size() + 1); g.name = nm; g_groups.push_back(g); int gi = (int)g_groups.size() - 1; for (int si : v) g_scans[si].group = gi; g_dirty = true; refresh(); showProps();
+  GroupRec g; wchar_t nm[64]; swprintf(nm, 64, L"Group %d", (int)g_groups.size() + 1); g.name = nm; { std::lock_guard<std::mutex> l(g_scanMx); g_groups.push_back(g); int gi = (int)g_groups.size() - 1; for (int si : v) g_scans[si].group = gi; } g_dirty = true; refresh(); showProps();   // review C5: under the lock
 }
-static void ungroup() { int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); if (r < 0) return; int gi = groupAt(r); int si = scanAt(r); if (si >= 0) gi = g_scans[si].group; if (gi < 0) return;
-  for (auto& s : g_scans) if (s.group == gi) s.group = -1; g_groups.erase(g_groups.begin() + gi); for (auto& s : g_scans) if (s.group > gi) s.group--; g_dirty = true; refresh(); showProps(); }
-static void duplicateSelected() { std::vector<int> v = highlightedScans(); std::sort(v.begin(), v.end()); for (int k = (int)v.size() - 1; k >= 0; k--) duplicateScan(v[k]); changed(); }
+static void ungroup() { if (!editOk()) return; int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); if (r < 0) return; int gi = groupAt(r); int si = scanAt(r); if (si >= 0) gi = g_scans[si].group; if (gi < 0) return;
+  { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) if (s.group == gi) s.group = -1; g_groups.erase(g_groups.begin() + gi); for (auto& s : g_scans) if (s.group > gi) s.group--; } g_dirty = true; refresh(); showProps(); }
+static void duplicateSelected() { if (!editOk()) return; std::vector<int> v = highlightedScans(); std::sort(v.begin(), v.end()); for (int k = (int)v.size() - 1; k >= 0; k--) duplicateScan(v[k]); changed(); }
 static void changeColor(HWND owner) {
   std::vector<int> v = highlightedScans(); int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); int gi = r >= 0 ? groupAt(r) : -1; if (v.empty()) return;
   static COLORREF cust[16]; CHOOSECOLORW cc = {sizeof cc}; cc.hwndOwner = owner; cc.lpCustColors = cust; auto& c0 = g_scans[v[0]].color; cc.rgbResult = RGB((int)(c0[0] * 255), (int)(c0[1] * 255), (int)(c0[2] * 255)); cc.Flags = CC_RGBINIT | CC_FULLOPEN;
   if (!ChooseColorW(&cc)) return; for (int si : v) { auto& c = g_scans[si].color; c[0] = GetRValue(cc.rgbResult) / 255.f; c[1] = GetGValue(cc.rgbResult) / 255.f; c[2] = GetBValue(cc.rgbResult) / 255.f; } (void)gi; InvalidateRect(list, nullptr, TRUE);
 }
-static void rename() { int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); if (r >= 0) { SetFocus(list); ListView_EditLabel(list, r); } }
+static void rename() { if (!editOk()) return; int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); if (r >= 0) { SetFocus(list); ListView_EditLabel(list, r); } }
 static void sortBy(int col) {   // Studio: click a header → ascending → descending → initial
+  if (!editOk()) return;
   if (sortCol != col) { sortCol = col; sortDir = 1; } else sortDir = sortDir == 1 ? 2 : sortDir == 2 ? 0 : 1;
   static std::vector<ScanRec> initial; if (sortDir == 1 && initial.empty()) { /* keep a copy of the order only via names */ }
   std::vector<int> order(g_scans.size()); for (int i = 0; i < (int)order.size(); i++) order[i] = i;
   if (sortDir) { auto key = [&](int a, int b) { auto& A = g_scans[a]; auto& B = g_scans[b]; bool lt; switch (col) { case 0: lt = _wcsicmp(A.name.c_str(), B.name.c_str()) < 0; break; case 3: lt = A.maxErr < B.maxErr; break; case 4: lt = A.frames < B.frames; break; case 6: lt = A.texFrames < B.texFrames; break; default: lt = a < b; } return sortDir == 1 ? lt : !lt && !(A.name == B.name && A.frames == B.frames); };
     std::stable_sort(order.begin(), order.end(), key); }
   else return;   // "initial": leave the current (creation) order as is
-  std::vector<ScanRec> ns; for (int i : order) ns.push_back(std::move(g_scans[i])); { std::lock_guard<std::mutex> l(g_scanMx); g_scans = std::move(ns); } view::selectedScan = -1; rebuildMaster(); refresh(); showProps();
+  { std::lock_guard<std::mutex> l(g_scanMx); std::vector<ScanRec> ns; for (int i : order) ns.push_back(std::move(g_scans[i])); g_scans = std::move(ns); } /* review C2: moved under the lock */ view::selectedScan = -1; rebuildMaster(); refresh(); showProps();
 }
 static void contextMenu(HWND owner, int x, int y) {
   HMENU m = CreatePopupMenu(); std::vector<int> v = highlightedScans(); bool any = !v.empty(); int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); bool grp = r >= 0 && groupAt(r) >= 0;
@@ -94,7 +100,7 @@ static bool notify(HWND owner, NMHDR* n) {
   case NM_CLICK: { auto* p = (NMITEMACTIVATE*)n; bool ctrl = GetKeyState(VK_CONTROL) < 0, alt = GetKeyState(VK_MENU) < 0; if (p->iItem >= 0 && ((ctrl && alt) || (ctrl && p->iSubItem == 0 && p->ptAction.x < 20))) { int si = scanAt(p->iItem); if (si >= 0) onlyThis(si); } return true; }
   case LVN_COLUMNCLICK: { auto* p = (NMLISTVIEW*)n; sortBy(p->iSubItem); return true; }
   case LVN_ENDLABELEDITW: { auto* p = (NMLVDISPINFOW*)n; if (!p->item.pszText || !*p->item.pszText) return true; std::wstring t = p->item.pszText; while (!t.empty() && t.front() == L' ') t.erase(t.begin()); int si = scanAt(p->item.iItem), gi = groupAt(p->item.iItem);
-    if (si >= 0) setScanName(g_scans[si], t); else if (gi >= 0) g_groups[gi].name = t; g_dirty = true; refresh(); showProps(); return true; }
+    if (!editOk()) { refresh(); return true; } { std::lock_guard<std::mutex> l(g_scanMx); if (si >= 0) setScanName(g_scans[si], t); else if (gi >= 0) g_groups[gi].name = t; } g_dirty = true; refresh(); showProps(); return true; }
   case LVN_KEYDOWN: { auto* p = (NMLVKEYDOWN*)n; bool ctrl = GetKeyState(VK_CONTROL) < 0, alt = GetKeyState(VK_MENU) < 0;
     if (p->wVKey == VK_DELETE) { deleteSelected(owner); return true; } if (p->wVKey == VK_F2) { rename(); return true; } if (p->wVKey == VK_SPACE) { toggleHighlighted(); return true; }
     if (p->wVKey == 'A' && ctrl && alt) { invert(); return true; } if (p->wVKey == 'A' && ctrl) { setAllVisible(true); return true; } if (p->wVKey == 'D' && ctrl) { setAllVisible(false); return true; } if (p->wVKey == 'G' && ctrl) { groupSelected(owner); return true; } return false; }

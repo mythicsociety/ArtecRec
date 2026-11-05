@@ -49,7 +49,9 @@ static void readSettings() {
   S.distColor = SendMessageW(cDist, BM_GETCHECK, 0, 0) == BST_CHECKED; S.autoAlign = SendMessageW(cAlign, BM_GETCHECK, 0, 0) == BST_CHECKED; S.hidePanel = SendMessageW(cHide, BM_GETCHECK, 0, 0) == BST_CHECKED;
   S.speed = (int)SendMessageW(sSpeed, TBM_GETPOS, 0, 0); int nearV = (int)SendMessageW(sNear, TBM_GETPOS, 0, 0), farV = (int)SendMessageW(sFar, TBM_GETPOS, 0, 0);
   if (nearV > farV - 20) { if (GetFocus() == sFar) { nearV = farV - 20; SendMessageW(sNear, TBM_SETPOS, TRUE, nearV); } else { farV = nearV + 20; SendMessageW(sFar, TBM_SETPOS, TRUE, farV); } }   // Studio keeps near < far
+  { int n0 = nearV, f0 = farV; logic::clampRange(nearV, farV); if (n0 != nearV) SendMessageW(sNear, TBM_SETPOS, TRUE, nearV); if (f0 != farV) SendMessageW(sFar, TBM_SETPOS, TRUE, farV); }   // review F4: an old ini (100..500) is brought into range
   S.nearMm = (float)nearV; S.farMm = (float)farV;
+  { wchar_t tk[96]; int d = farV - nearV; swprintf(tk, 96, L"%d            %d            %d            %d", nearV, nearV + d / 3, nearV + 2 * d / 3, farV); SetWindowTextW(lTicks, tk); }   // ticks follow the setting
   S.sens = SendMessageW(sSens, TBM_GETPOS, 0, 0) / 100.f; S.texBright = SendMessageW(sBright, TBM_GETPOS, 0, 0) / 100.f; S.autoBright = SendMessageW(cAuto, BM_GETCHECK, 0, 0) == BST_CHECKED;
   S.recordTexture = SendMessageW(cNoTex, BM_GETCHECK, 0, 0) != BST_CHECKED; S.flash = SendMessageW(cNoFlash, BM_GETCHECK, 0, 0) != BST_CHECKED;
   S.texFreq = SendMessageW(rFreqN, BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0; wchar_t b[64]; GetWindowTextW(eFreqN, b, 64); S.texEvery = _wtoi(b); if (S.texEvery < 1) S.texEvery = 1;
@@ -87,14 +89,14 @@ static void create(HWND parent, HFONT f, HFONT fb, HFONT fs, const wchar_t* scan
   lTrack = mk(L"STATIC", L"Features to track", SS_LEFT); rGeoTex = mk(L"BUTTON", L"Geometry + Texture", BS_AUTORADIOBUTTON | WS_GROUP); rGeo = mk(L"BUTTON", L"Geometry", BS_AUTORADIOBUTTON); rTargets = mk(L"BUTTON", L"Targets   (not available in the SDK)", BS_AUTORADIOBUTTON);
   SendMessageW(rGeoTex, BM_SETCHECK, BST_CHECKED, 0); EnableWindow(rTargets, FALSE);
   cDist = mk(L"BUTTON", L"Show distance color", BS_AUTOCHECKBOX | WS_GROUP); SendMessageW(cDist, BM_SETCHECK, BST_CHECKED, 0);
-  cAlign = mk(L"BUTTON", L"Auto-align new scans with those marked in Workspace", BS_AUTOCHECKBOX);
+  cAlign = mk(L"BUTTON", L"Auto-align new scans with those marked in Workspace", BS_AUTOCHECKBOX); SendMessageW(cAlign, BM_SETCHECK, BST_CHECKED, 0);   // review F2: on by default
   cBase = mk(L"BUTTON", L"Enable automatic base removal   (not in the SDK)", BS_AUTOCHECKBOX); EnableWindow(cBase, FALSE);
   cFusion = mk(L"BUTTON", L"Real-time fusion   (not in the SDK)", BS_AUTOCHECKBOX); EnableWindow(cFusion, FALSE);
   cRtp = mk(L"BUTTON", L"Enable real-time processing   (always on)", BS_AUTOCHECKBOX); SendMessageW(cRtp, BM_SETCHECK, BST_CHECKED, 0); EnableWindow(cRtp, FALSE);
   lSpeed = mk(L"STATIC", L"Scanning speed", SS_LEFT); lSpeedL = mk(L"STATIC", L"1 fps", SS_LEFT, fs); lSpeedR = mk(L"STATIC", L"8 fps", SS_RIGHT, fs); sSpeed = slider(1, 8, 8);
   bAdv = mk(L"BUTTON", L"Advanced  —", BS_PUSHBUTTON | BS_LEFT);
   cHide = mk(L"BUTTON", L"Hide panels during scanning (full-screen view)", BS_AUTOCHECKBOX); SendMessageW(cHide, BM_SETCHECK, BST_CHECKED, 0);
-  lDof = mk(L"STATIC", L"Depth of field", SS_LEFT); lNear = mk(L"STATIC", L"Near (mm): 170", SS_LEFT, fs); sNear = slider(100, 400, 170); lTicks = mk(L"STATIC", L"170            223            276            330", SS_CENTER, fs); lFar = mk(L"STATIC", L"Far (mm): 330", SS_LEFT, fs); sFar = slider(120, 500, 330);
+  lDof = mk(L"STATIC", L"Depth of field", SS_LEFT); lNear = mk(L"STATIC", L"Near (mm): 170", SS_LEFT, fs); sNear = slider(150, 330, 170); lTicks = mk(L"STATIC", L"170            223            276            330", SS_CENTER, fs); lFar = mk(L"STATIC", L"Far (mm): 330", SS_LEFT, fs); sFar = slider(170, 400, 330);   // review F4: within the Space Spider's range
   cMotion = mk(L"BUTTON", L"Motion tolerance   (not in the SDK)", BS_AUTOCHECKBOX); EnableWindow(cMotion, FALSE);
   lName = mk(L"STATIC", L"Scan name", SS_LEFT); eName = mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP);
   lSens = mk(L"STATIC", L"Sensitivity", SS_LEFT); lSensL = mk(L"STATIC", L"Normal", SS_LEFT, fs); lSensR = mk(L"STATIC", L"Extreme", SS_RIGHT, fs); sSens = slider(0, 100, 0);
@@ -125,7 +127,7 @@ static void saveIni() {
 static void loadIni() {
   std::wstring f = iniPath(); if (GetFileAttributesW(f.c_str()) == INVALID_FILE_ATTRIBUTES) { iniLoaded = true; return; } auto ri = [&](const wchar_t* k, int d) { return (int)GetPrivateProfileIntW(L"scan", k, d, f.c_str()); };
   auto chk = [](HWND h, bool v) { SendMessageW(h, BM_SETCHECK, v ? BST_CHECKED : BST_UNCHECKED, 0); }; auto pos = [](HWND h, int v) { SendMessageW(h, TBM_SETPOS, TRUE, v); };
-  int tr = ri(L"tracking", 0); chk(rGeoTex, tr == 0); chk(rGeo, tr == 1); chk(cDist, ri(L"distColor", 1)); int aa = ri(L"autoAlign", 0); chk(cAlign, aa != 0); chk(cHide, ri(L"hidePanel", 1));
+  int tr = ri(L"tracking", 0); chk(rGeoTex, tr == 0); chk(rGeo, tr == 1); chk(cDist, ri(L"distColor", 1)); int aa = ri(L"autoAlign", 1); /* review F2: joining new passes is on unless the user switched it off */ chk(cAlign, aa != 0); chk(cHide, ri(L"hidePanel", 1));
   pos(sSpeed, ri(L"speed", 8)); pos(sNear, ri(L"near", 170)); pos(sFar, ri(L"far", 330)); pos(sSens, ri(L"sens", 0)); pos(sBright, ri(L"texBright", 0)); chk(cAuto, ri(L"autoBright", 1));
   chk(cNoTex, !ri(L"recordTexture", 1)); chk(cNoFlash, !ri(L"flash", 1)); int tf = ri(L"texFreq", 0); chk(rFreqAuto, tf == 0); chk(rFreqN, tf == 1); wchar_t b[32];
   swprintf(b, 32, L"%d", ri(L"texEvery", 1)); SetWindowTextW(eFreqN, b); swprintf(b, 32, L"%d", ri(L"delay", 0)); SetWindowTextW(eDelay, b); chk(cLimit, ri(L"limitFrames", 0)); swprintf(b, 32, L"%d", ri(L"frameLimit", 2000)); SetWindowTextW(eLimit, b);

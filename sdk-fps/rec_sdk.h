@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <memory>
 #include "rec_feat.h"
+#include "rec_logic.h"
 #include <artec/sdk/base/Log.h>
 #include <artec/sdk/base/IModel.h>
 #include <artec/sdk/base/IScan.h>
@@ -109,9 +110,9 @@ static void grabTexture(const IFrameMesh* f, FrameMesh& out) {
   int ch = pf == PixelFormat_BGR || pf == PixelFormat_RGB ? 3 : pf == PixelFormat_BGRA || pf == PixelFormat_RGBA ? 4 : pf == PixelFormat_Mono ? 1 : 0;
   if (!ch) { static bool once = false; if (!once) { once = true; logf("texture image format %d not handled (%dx%d)", (int)pf, w, h); } return; } if (w < 4 || h < 4) return; bool bgr = pf == PixelFormat_BGR || pf == PixelFormat_BGRA;
   const unsigned char* p = (const unsigned char*)img->getPointer(); int ow = w / 2, oh = h / 2; out.tex.resize((size_t)ow * oh * 3); out.texW = ow; out.texH = oh;
-  static unsigned char lut[1024]; static bool lutInit = false;   // display brightening like Studio's texture view: gamma 1/1.7 on the 2x2 average
-  // Measured 2 Nov: raw frames already average ~199/255, so the earlier gamma 1/1.7 washed them to cream. Mild gamma only.
-  if (!lutInit) { for (int i = 0; i < 1024; i++) { double v = pow(i / 1020.0, 1.0 / 1.3) * 255.0 + 0.5; lut[i] = (unsigned char)(v > 255 ? 255 : v); } lutInit = true; }
+  // display brightening like Studio's texture view. Measured 2 Nov: raw frames already average ~199/255, so the earlier
+  // gamma 1/1.7 washed them to cream. Mild gamma only. Built once, thread-safe (review C11: callback, tidy-up and align threads).
+  struct Lut { unsigned char v[1024]; Lut() { for (int i = 0; i < 1024; i++) { double x = pow(i / 1020.0, 1.0 / 1.3) * 255.0 + 0.5; v[i] = (unsigned char)(x > 255 ? 255 : x); } } }; static const Lut lutTab; const unsigned char* lut = lutTab.v;
   // Exposure normalisation: the raw camera frame (0.2 ms shutter, flash) is dark and its brightness falls with the
   // flash distance. Studio shows every frame at an even brightness, so scale each frame so that its mean luminance
   // lands on a fixed target before the display gamma. Mean over every 4th pixel of the full-res image.
@@ -162,7 +163,14 @@ static std::atomic<long> g_frames{0}, g_regFail{0}, g_lost{0}, g_keyFrames{0}, g
 static std::atomic<long> g_cbFrames{0}; static clk::time_point g_procStart;   // frames delivered by the SDK since the procedure started (any mode) — a stalled capture shows as 0
 static std::deque<clk::time_point> g_stamps; static std::mutex g_stmx;
 static clk::time_point g_recStart; static double g_recSecs = 0;
-static bool g_dirty = false; static std::wstring g_projPath; static std::wstring g_alignMsg;
+// Review C5: the status line text is written by background threads and read by the UI every 40 ms: guarded string.
+struct LockedText { std::mutex m; std::wstring s; void operator=(const std::wstring& v) { std::lock_guard<std::mutex> l(m); s = v; } void operator=(const wchar_t* v) { std::lock_guard<std::mutex> l(m); s = v; } std::wstring get() { std::lock_guard<std::mutex> l(m); return s; } void clear() { std::lock_guard<std::mutex> l(m); s.clear(); } };
+static bool g_dirty = false; static std::wstring g_projPath; static LockedText g_alignMsg;
+// Non-modal notice for the team (review B9: no message boxes while scanning); shown in the scan panel and status bar.
+static LockedText g_notice; static void notice(const std::wstring& s) { g_notice = s; }
+static bool g_projForeign = false;   // the open project holds Studio entries ArtecRec does not load (review A2)
+static bool g_stuck = false;         // the scanner job was abandoned after a failed Stop/cancel (review B3): save, then restart
+static std::wstring g_saveErr;       // why the last save failed, in plain words (review F6)
 static std::atomic<bool> g_lostNow{false}; static std::atomic<int> g_countdown{0};
 static HWND g_hwnd;
 #define WM_JOBDONE   (WM_APP + 1)
@@ -182,10 +190,11 @@ struct ScanObs : public ScannerObserverBase {
 static ScanObs* g_scanObs;
 
 // live auto-align ("Searching for position"): the first frames of a new scan are matched against the reference scans
-static std::atomic<bool> g_alignLive{false}, g_liveFound{false}, g_searchBusy{false}; static double g_liveT[4][4]; static std::mutex g_liveTmx; static bool g_forceAlign = false;
+static std::atomic<bool> g_alignLive{false}, g_liveFound{false}, g_searchBusy{false}, g_searchStop{false}; static double g_liveT[4][4]; static std::mutex g_liveTmx; static bool g_forceAlign = false;
 static std::atomic<long> g_foundAt{0}, g_storedFrames{0};   // frames captured before the position was found are discarded, as Studio does not record them
 static std::vector<bool> g_frameBad; static std::mutex g_frameBadMx;   // per stored frame: registration failed (Studio records no such frame)
-static IScan* g_tempScan; static IScan* g_tempTex; static std::atomic<int> g_tempCount{0}; static std::mutex g_tempMx; static clk::time_point g_lastSearch; static std::thread g_searchThread; static int g_searchTries = 0;   // g_tempTex: latest textured probe frames for the hybrid resume registration
+static IScan* g_tempScan; static IScan* g_tempTex; static std::atomic<int> g_tempCount{0}; static std::mutex g_tempMx; struct AtomicTime { std::atomic<long long> t{0}; void operator=(clk::time_point v) { t = v.time_since_epoch().count(); } operator clk::time_point() const { return clk::time_point(clk::duration(t.load())); } };
+static AtomicTime g_lastSearch; static std::thread g_searchThread; static std::atomic<int> g_searchTries{0};   // g_tempTex: latest textured probe frames for the hybrid resume registration
 static void setIdentity(double M[4][4]) { for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) M[i][j] = i == j ? 1.0 : 0.0; }
 // live view data (SDK thread writes under g_mx)
 static std::mutex g_mx;
@@ -304,7 +313,9 @@ struct Obs : public ScanningProcedureObserverBase {
       if (g_liveAcc.size() >= LIVE_ACC_MAX) { std::vector<FrameMesh> half; for (size_t j = 0; j < g_liveAcc.size(); j += 2) half.push_back(std::move(g_liveAcc[j])); g_liveAcc = std::move(half); } g_liveAcc.push_back(std::move(k)); }
     g_live = std::move(m); g_live.noVbo = true; g_newData = true;
   }
-  void onScanningFinished(int) override {}
+  // review C4: the search holds the procedure's own live frames; the SDK post-processes their textures after this
+  // call, so the search is stopped and given up to 5 s to let go of them first.
+  void onScanningFinished(int) override { g_searchStop = true; for (int i = 0; i < 100 && g_searchBusy.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50)); if (g_searchBusy.load()) logf("the position search did not stop within 5 s of the end of the scan"); }
 };
 static Obs* g_obs;
 
@@ -327,20 +338,30 @@ static void applyLiveSettings() {
   if (g_proc) { g_proc->setScanningRange(S.nearMm.load(), S.farMm.load()); g_proc->setSensitivity(g_sensDefault + (1.f - g_sensDefault) * S.sens); }   // Normal = default, Extreme = 1
 }
 // Reset per-scan state; arm the live position search when recording with references (called at Record, also from Preview).
-static int g_hybridNext = 0;   // rotation index over the hybrid-resume windows
+static std::atomic<int> g_hybridNext{0};   // rotation index over the hybrid-resume windows
 static void prepareRecording(bool recording) {
+  // review C8: a search still running from before Pause/Resume or a restart is stopped and joined before the state is
+  // reset, so its late result cannot place the new pass (its jobs are cancelled through g_searchStop, 20 s at most)
+  g_searchStop = true; if (g_searchThread.joinable()) g_searchThread.join(); g_searchStop = false; g_searchBusy = false;
   { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { g_tempScan->release(); g_tempScan = nullptr; } if (g_tempTex) { g_tempTex->release(); g_tempTex = nullptr; } g_tempCount = 0; }
-  int refs = 0; for (auto& s : g_scans) if (s.visible && s.scan && (s.group < 0 || g_groups[s.group].visible)) refs++;
+  int refs = 0; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) if (s.visible && s.scan && (s.group < 0 || (s.group < (int)g_groups.size() && g_groups[s.group].visible))) refs++; }
   g_liveFound = false; g_foundAt = 0; g_searchTries = 0; g_hybridNext = 0; g_lastSearch = clk::now(); { std::lock_guard<std::mutex> l(g_frameBadMx); g_frameBad.clear(); }
   { // starting guess for the new pass: the pose of the last frame of the most recent visible pass (the SDK starts every
     // procedure at the origin, which put the live view at the START of pass 1 — owner, 4 Nov 17:3x)
-    double G[4][4]; setIdentity(G); { std::lock_guard<std::mutex> l(g_scanMx); for (int i = (int)g_scans.size() - 1; i >= 0; i--) { auto& s = g_scans[i]; if (!(s.visible && s.scan && s.scan->getSize() > 0 && (s.group < 0 || g_groups[s.group].visible))) continue; mul44(s.scan->getScanTransformation().m, s.scan->getTransformation(s.scan->getSize() - 1).m, G); break; } }
+    double G[4][4]; setIdentity(G); { std::lock_guard<std::mutex> l(g_scanMx); for (int i = (int)g_scans.size() - 1; i >= 0; i--) { auto& s = g_scans[i]; if (!(s.visible && s.scan && s.scan->getSize() > 0 && (s.group < 0 || (s.group < (int)g_groups.size() && g_groups[s.group].visible)))) continue; mul44(s.scan->getScanTransformation().m, s.scan->getTransformation(s.scan->getSize() - 1).m, G); break; } }
     std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, G, sizeof G); }
   g_frames = 0; g_regFail = 0; g_lost = 0; g_keyFrames = 0; g_texFrames = 0; g_maxErr = 0; g_storedFrames = 0;
   g_alignLive = (S.autoAlign || g_forceAlign) && refs > 0 && recording;   // g_forceAlign: resuming after lost tracking (Studio's "Scan using auto-alignment" works regardless of the Scan-panel checkbox)
   if (g_alignLive) { std::lock_guard<std::mutex> l(g_tempMx); createScan(&g_tempScan, g_scannerId.type); createScan(&g_tempTex, g_scannerId.type); }
 }
+// Review C6: one live-search result per recorded segment (Pause/Resume makes one scan per segment).
+static std::vector<logic::SegmentPose> g_segPoses;
+static void pushSegmentPose() { logic::SegmentPose p; p.found = g_alignLive.load() && g_liveFound.load(); { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(p.T, g_liveT, sizeof p.T); } g_segPoses.push_back(p); }
+// Review B3: a scanning job whose Stop and cancel both failed is abandoned: its thread is detached, its late WM_JOBDONE
+// (if it ever comes) is ignored by generation, and the app goes to Idle with g_stuck set so the scans can be saved.
+static std::atomic<int> g_jobGen{0};
 static bool startProcedure(ScanningState initial) {
+  if (g_stuck) { logf("start refused: the scanner job is stuck; restart ArtecRec"); return false; }
   if (!g_scanner) { logf("start refused: no scanner connected"); return false; }
   ScanningProcedureSettings st; initializeScanningProcedureSettings(&st);
   bool tex = S.recordTexture; bool hybrid = S.tracking == 0 && tex;
@@ -357,29 +378,51 @@ static bool startProcedure(ScanningState initial) {
   createModel(&g_jobOut); g_jobDone = false; g_cbFrames = 0; g_procStart = clk::now(); g_frames = 0; g_regFail = 0; g_lost = 0; g_keyFrames = 0; g_texFrames = 0; g_maxErr = 0; g_lostNow = false;
   prepareRecording(initial == ScanningState_Record);
   { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); g_live = FrameMesh(); }
-  ICancellationTokenSource* cts = nullptr; createCancellationTokenSource(&cts); { std::lock_guard<std::mutex> l(g_ctsMx); g_cts = cts; } g_stopAsked = false; g_cancelSent = false;
-  g_job = std::thread([cts] {
-    IModel* in = nullptr; createModel(&in); AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = g_jobOut; ws.threadsCount = std::thread::hardware_concurrency();
+  ICancellationTokenSource* cts = nullptr; createCancellationTokenSource(&cts); { std::lock_guard<std::mutex> l(g_ctsMx); g_cts = cts; } g_stopAsked = false; g_cancelSent = false; g_segPoses.clear();
+  int gen = ++g_jobGen; IScanningProcedure* proc = g_proc; IModel* jobOut = g_jobOut; proc->addRef(); jobOut->addRef();   // the thread owns its own references (it may be abandoned)
+  g_job = std::thread([cts, gen, proc, jobOut] {
+    IModel* in = nullptr; createModel(&in); AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = jobOut; ws.threadsCount = std::thread::hardware_concurrency();
     if (cts) ws.cancellation = cts->getToken();
-    g_jobEc = executeJob(g_proc, &ws); in->release();
+    ErrorCode ec = executeJob(proc, &ws); in->release();
     { std::lock_guard<std::mutex> l(g_ctsMx); if (g_cts == cts) g_cts = nullptr; } if (cts) cts->release();
-    g_jobDone = true; PostMessageW(g_hwnd, WM_JOBDONE, 0, 0);
+    proc->release(); jobOut->release();
+    if (gen != g_jobGen.load()) return;   // abandoned: the app has moved on
+    g_jobEc = ec; g_jobDone = true; PostMessageW(g_hwnd, WM_JOBDONE, (WPARAM)gen, 0);
   });
   logf("procedure started (%s, texture=%d, tracking=%s, range %.0f..%.0f, sens %.2f, speed %d, texFreq %s)", initial == ScanningState_Record ? "record" : "preview", (int)tex, hybrid ? "geometry+texture" : "geometry",
        S.nearMm.load(), S.farMm.load(), S.sens, S.speed, S.texFreq == 0 ? "auto" : "every N"); return true;
 }
-static void stopProcedure() { if (g_proc && !g_jobDone) { g_mode = M_Stopping; if (!g_stopAsked) { g_stopAsked = true; g_stopAt = clk::now(); } g_proc->setState(ScanningState_Stop); } }
+// Review B1/B8: Stop also stops the position search, and the SDK's setState runs on a helper thread so a scanner that
+// stopped answering cannot freeze the window (the 8 s cancel below runs from the same UI timer).
+static void stopProcedure() { if (g_proc && !g_jobDone) { g_mode = M_Stopping; g_searchStop = true; if (!g_stopAsked) { g_stopAsked = true; g_stopAt = clk::now(); IScanningProcedure* p = g_proc; p->addRef(); std::thread([p] { p->setState(ScanningState_Stop); p->release(); }).detach(); } } }
 // 5 Nov 12:01: the scanner dropped off USB mid-recording; the SDK procedure never returned from Stop (waitForTriggerReady
 // errors, ~1,500 in 6 min) and ArtecRec sat in "Stopping" until killed in Task Manager — three unsaved scans lost.
 // If Stop has not finished in 8 s, cancel the procedure through its cancellation token.
-static void cancelStuckProcedure() {
-  if (g_jobDone || !g_stopAsked || g_cancelSent || std::chrono::duration<double>(clk::now() - g_stopAt).count() < 8.0) return;
-  g_cancelSent = true; std::lock_guard<std::mutex> l(g_ctsMx); if (g_cts) { g_cts->cancel(); logf("Stop did not finish in 8 s (scanner not answering): procedure cancelled"); } }
+// Returns true when the job was abandoned just now (review B3): 8 s after Stop a cancel is sent; 12 s after the cancel,
+// if the job still has not returned, it is given up so the scans already in the Workspace can be saved.
+static bool cancelStuckProcedure() {
+  if (g_jobDone || !g_stopAsked || !g_proc) return false; double since = std::chrono::duration<double>(clk::now() - g_stopAt).count();
+  if (!g_cancelSent && since >= 8.0) { g_cancelSent = true; std::lock_guard<std::mutex> l(g_ctsMx); if (g_cts) g_cts->cancel(); logf("Stop did not finish in 8 s (scanner not answering): procedure cancelled"); return false; }
+  if (g_cancelSent && since >= 20.0) { logf("the scanning job did not end 12 s after the cancel: abandoned; the scans already recorded can be saved");
+    ++g_jobGen; g_job.detach(); g_proc->release(); g_proc = nullptr; if (g_jobOut) { g_jobOut->release(); g_jobOut = nullptr; }
+    g_searchStop = true; if (g_searchThread.joinable()) g_searchThread.detach();
+    { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { g_tempScan->release(); g_tempScan = nullptr; } if (g_tempTex) { g_tempTex->release(); g_tempTex = nullptr; } } g_alignLive = false;
+    { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); g_live = FrameMesh(); }
+    g_stuck = true; g_mode = M_Idle; return true; }
+  return false; }
 static IScan* buildRef(IScan* s, int cap);
 static bool g_featSearch = false;   // image-feature position search (the "FS" build: exe name contains "artecrec-fs")
 // Image-feature position search: match the latest textured probe frame against the feature banks of all visible
 // scans, RANSAC a rigid pose from the 3D correspondences, then tighten with the SDK's textured global registration
 // over [the matched frame's textured neighbours + the probe frames]. T = live transform for the new scan.
+// `stop` (optional): an outside request to give up early (the position search is stopped this way at Stop, review B1).
+template <class J> static ErrorCode execLimited(J* job, AlgorithmWorkset* ws, int maxSecs, const char* what, const std::atomic<bool>* stop = nullptr) {
+  ICancellationTokenSource* cts = nullptr; createCancellationTokenSource(&cts); if (cts) ws->cancellation = cts->getToken();
+  std::atomic<bool> fin{false}, gaveUp{false};
+  std::thread wd([&] { for (int i = 0; i < maxSecs * 10 && !fin.load() && !(stop && stop->load()); i++) std::this_thread::sleep_for(std::chrono::milliseconds(100)); if (!fin.load() && cts) { gaveUp = true; cts->cancel(); if (stop && stop->load()) logf("%s: stopped", what); else logf("%s: no result in %d s, cancelled; scan kept as it was", what, maxSecs); } });
+  ErrorCode ec = executeJob(job, ws); fin = true; wd.join(); ws->cancellation = nullptr; if (cts) cts->release();
+  return gaveUp.load() && ec == ErrorCode_OK ? ErrorCode_OperationAborted : ec;
+}
 struct ScanHold { IScan* p = nullptr; ~ScanHold() { if (p) p->release(); } };   // see the 11:55 note at hybridResume
 static bool featureSearch(double T[4][4], int& inliers, int& matches, int& refScan, int& refFrame, double& secs) {
   inliers = 0; matches = -1; refScan = refFrame = -1; auto t0 = clk::now();
@@ -413,7 +456,7 @@ static bool featureSearch(double T[4][4], int& inliers, int& matches, int& refSc
       std::vector<Matrix4x4D> pin; { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempTex) for (int j = 0; j < g_tempTex->getSize(); j++) { Matrix4x4D fj = g_tempTex->getTransformation(j); double W[4][4]; mul44(live, fj.m, W); Matrix4x4D Mw; memcpy(Mw.m, W, sizeof W); R->add(g_tempTex->getElement(j), Mw); pin.push_back(fj); } }
       int np = (int)pin.size(); ensureNormals(R); IModel* in = nullptr; createModel(&in); in->add(R); IModel* out = nullptr; createModel(&out);
       alg::GlobalRegistrationSettings gd; gd.scannerType = src->getScannerType(); gd.registrationType = alg::GlobalRegistrationType_GeometryAndTexture; alg::IAlgorithm* ga = nullptr; ErrorCode ec = alg::createGlobalRegistrationAlgorithm(&ga, &gd);
-      auto tg = clk::now(); if (ec == ErrorCode_OK && ga) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = executeJob(ga, &ws); ga->release(); }
+      auto tg = clk::now(); if (ec == ErrorCode_OK && ga) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(ga, &ws, 20, "position search", &g_searchStop); ga->release(); }
       if (ec == ErrorCode_OK && out->getSize() == 1 && out->getElement(0)->getSize() == nRef + np && np > 0) { IScan* Ro = out->getElement(0);
         // anchor on the last reference frame; live = refIn * inv(refOut) * probeOut * inv(Fin_probe)
         double refIn[4][4], refOut[4][4], inv[4][4], A[4][4]; memcpy(refIn, R->getTransformation(nRef - 1).m, sizeof refIn); memcpy(refOut, Ro->getTransformation(nRef - 1).m, sizeof refOut); invRigid(refOut, inv); mul44(refIn, inv, A);
@@ -436,10 +479,14 @@ struct HybridWindow { int scan; std::vector<int> frames; };
 // 5 Nov 10:55 crash (0xC0000409 in ucrtbase): after a tracking loss the position search read the frames of the scan
 // just closed while cleanScan was rewriting them (points/triangles replaced in place). The scan being cleaned is
 // published here; the search waits (returns, retries in 2 s) while it is set. Cleaning takes 0.2–1.2 s.
-static std::atomic<IScan*> g_cleaningScan{nullptr};
+// Scans being cleaned (review C7: one slot was not enough with Pause/Resume). The search skips these scans.
+static std::mutex g_cleanMx; static std::vector<IScan*> g_cleaning;
+static bool isCleaning(IScan* s) { std::lock_guard<std::mutex> l(g_cleanMx); return std::find(g_cleaning.begin(), g_cleaning.end(), s) != g_cleaning.end(); }
+// Review B1/C4/C8: the search is stopped (its SDK jobs cancelled through their tokens) at Stop, at the start of a new
+// recording and when the scanning procedure finishes; every search job also has a 20 s limit.
 static std::vector<HybridWindow> hybridWindows() {
   std::vector<HybridWindow> w; std::lock_guard<std::mutex> l(g_scanMx);
-  for (int i = (int)g_scans.size() - 1; i >= 0; i--) { auto& s = g_scans[i]; if (!(s.visible && s.scan && s.scan->getSize() > 0 && (s.group < 0 || g_groups[s.group].visible))) continue;
+  for (int i = (int)g_scans.size() - 1; i >= 0; i--) { auto& s = g_scans[i]; if (!(s.visible && s.scan && s.scan->getSize() > 0 && (s.group < 0 || (s.group < (int)g_groups.size() && g_groups[s.group].visible)))) continue; if (isCleaning(s.scan)) continue;
     std::vector<int> ti; for (int k = 0; k < s.scan->getSize(); k++) { IFrameMesh* f = s.scan->getElement(k); if (f && f->isTextured()) ti.push_back(k); }
     if (ti.size() < 3) continue;
     // 16-frame windows, step 10 (3 Nov evening: passes 3 and 4 of Trail7 sat visibly low in Studio with 10-frame windows)
@@ -460,18 +507,18 @@ static bool hybridResume(const HybridWindow& win, double T[4][4], int& nRef, int
   nProbe = (int)probeIn.size(); ensureNormals(R);
   IModel* in = nullptr; createModel(&in); in->add(R); IModel* out = nullptr; createModel(&out);
   alg::SerialRegistrationSettings sd; sd.scannerType = src->getScannerType(); sd.registrationType = alg::SerialRegistrationType_RoughTextured; alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createSerialRegistrationAlgorithm(&a, &sd);
-  auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = executeJob(a, &ws); a->release(); }
+  auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(a, &ws, 20, "position search", &g_searchStop); a->release(); }
   // Refine: the rough pass gives a coarse join (a visible step between passes, Gowtham's screenshot 3 Nov 17:04);
   // a fine textured pass on the rough result tightens it. Falls back to the rough result if the fine pass fails.
   IModel* out2 = nullptr;
   if (ec == ErrorCode_OK && out->getSize() == 1) { createModel(&out2); alg::SerialRegistrationSettings fd; fd.scannerType = src->getScannerType(); fd.registrationType = alg::SerialRegistrationType_FineTextured; alg::IAlgorithm* fa = nullptr;
-    if (alg::createSerialRegistrationAlgorithm(&fa, &fd) == ErrorCode_OK && fa) { AlgorithmWorkset ws2; memset(&ws2, 0, sizeof ws2); ws2.in = out; ws2.out = out2; ws2.threadsCount = std::thread::hardware_concurrency(); ErrorCode ec2 = executeJob(fa, &ws2); fa->release();
+    if (alg::createSerialRegistrationAlgorithm(&fa, &fd) == ErrorCode_OK && fa) { AlgorithmWorkset ws2; memset(&ws2, 0, sizeof ws2); ws2.in = out; ws2.out = out2; ws2.threadsCount = std::thread::hardware_concurrency(); ErrorCode ec2 = execLimited(fa, &ws2, 20, "position search", &g_searchStop); fa->release();
       if (ec2 == ErrorCode_OK && out2->getSize() == 1 && out2->getElement(0)->getSize() == nRef + nProbe) { IModel* t = out; out = out2; out2 = t; } else logf("hybrid resume: fine textured pass failed 0x%08X, using the rough join", (unsigned)ec2); }
     // Third step: global registration (texture + geometry) over the window + probe. The serial passes only register
     // consecutive pairs; measured joins on the herostone were 3.7–6.5 mm (joinmeasure, 4 Nov) against 0.1–0.5 mm where
     // the geometry auto-align works. Global registration optimises every overlap in the set; ~30 frames is fast.
     { IModel* out3 = nullptr; createModel(&out3); alg::GlobalRegistrationSettings gd; gd.scannerType = src->getScannerType(); gd.registrationType = alg::GlobalRegistrationType_GeometryAndTexture; alg::IAlgorithm* ga = nullptr;
-      if (alg::createGlobalRegistrationAlgorithm(&ga, &gd) == ErrorCode_OK && ga) { AlgorithmWorkset ws3; memset(&ws3, 0, sizeof ws3); ws3.in = out; ws3.out = out3; ws3.threadsCount = std::thread::hardware_concurrency(); auto tg = clk::now(); ErrorCode ec3 = executeJob(ga, &ws3); ga->release();
+      if (alg::createGlobalRegistrationAlgorithm(&ga, &gd) == ErrorCode_OK && ga) { AlgorithmWorkset ws3; memset(&ws3, 0, sizeof ws3); ws3.in = out; ws3.out = out3; ws3.threadsCount = std::thread::hardware_concurrency(); auto tg = clk::now(); ErrorCode ec3 = execLimited(ga, &ws3, 20, "position search", &g_searchStop); ga->release();
         if (ec3 == ErrorCode_OK && out3->getSize() == 1 && out3->getElement(0)->getSize() == nRef + nProbe) { IModel* t = out; out = out3; out3 = t; logf("hybrid resume: global registration in %.1f s", std::chrono::duration<double>(clk::now() - tg).count()); } else logf("hybrid resume: global registration failed 0x%08X", (unsigned)ec3); }
       if (out3) out3->release(); } }
   if (out2) out2->release();
@@ -496,17 +543,16 @@ static bool g_localResume = true;
 static void runPositionSearch() {
   if (g_searchBusy.exchange(true)) return; if (g_searchThread.joinable()) g_searchThread.join();
   g_searchThread = std::thread([] {
-    if (g_cleaningScan.load()) { g_lastSearch = clk::now(); g_searchBusy = false; return; }   // a scan is being cleaned: try again in 2 s
     if (g_localResume) { std::vector<HybridWindow> wins = hybridWindows(); bool texReady = false; Matrix4x4D Fin; { std::lock_guard<std::mutex> l(g_tempMx); texReady = g_tempTex && g_tempTex->getSize() >= 3; if (texReady) Fin = g_tempTex->getTransformation(g_tempTex->getSize() - 1); }
       if (texReady && !wins.empty()) { int latest = wins[0].scan; int tried = 0;
         for (size_t a = 0; a < wins.size() && tried < 3; a++) { const HybridWindow& win = wins[a]; if (win.scan != latest) break; tried++;
           double T[4][4]; int nr = 0, np = 0; double secs = 0; if (!hybridResume(win, T, nr, np, secs)) continue;
           // gate: where does this put the latest probe frame, and where is the tail of the previous pass?
           double pw[3] = {T[0][0] * Fin.m[0][3] + T[0][1] * Fin.m[1][3] + T[0][2] * Fin.m[2][3] + T[0][3], T[1][0] * Fin.m[0][3] + T[1][1] * Fin.m[1][3] + T[1][2] * Fin.m[2][3] + T[1][3], T[2][0] * Fin.m[0][3] + T[2][1] * Fin.m[1][3] + T[2][2] * Fin.m[2][3] + T[2][3]};
-          double rw[3] = {0, 0, 0}; { std::lock_guard<std::mutex> l(g_scanMx); if (win.scan < (int)g_scans.size() && g_scans[win.scan].scan) { double M[4][4]; mul44(g_scans[win.scan].scan->getScanTransformation().m, g_scans[win.scan].scan->getTransformation(win.frames.back()).m, M); rw[0] = M[0][3]; rw[1] = M[1][3]; rw[2] = M[2][3]; } }
+          double rw[3] = {0, 0, 0}; { std::lock_guard<std::mutex> l(g_scanMx); if (win.scan < (int)g_scans.size() && g_scans[win.scan].scan) { double M[4][4]; if (win.frames.back() < g_scans[win.scan].scan->getSize()) mul44(g_scans[win.scan].scan->getScanTransformation().m, g_scans[win.scan].scan->getTransformation(win.frames.back()).m, M); else setIdentity(M); rw[0] = M[0][3]; rw[1] = M[1][3]; rw[2] = M[2][3]; } }
           double dist = sqrt((pw[0] - rw[0]) * (pw[0] - rw[0]) + (pw[1] - rw[1]) * (pw[1] - rw[1]) + (pw[2] - rw[2]) * (pw[2] - rw[2]));   // camera-to-camera, for the log only (16:21: ~360 mm every time — a tilted scanner moves its camera far while looking at the same spot)
           // the real gate: the probe SURFACE (latest 3 textured frames under T) must lie on the window's surface
-          float share = 0, med = 99; { std::vector<float> wpts, ppts; { std::lock_guard<std::mutex> l(g_scanMx); if (win.scan < (int)g_scans.size() && g_scans[win.scan].scan) { IScan* ws = g_scans[win.scan].scan; const auto& ST = ws->getScanTransformation().m; for (int k : win.frames) { double M[4][4]; mul44(ST, ws->getTransformation(k).m, M); framePointsT(ws->getElement(k), M, 10, wpts); } } }
+          float share = 0, med = 99; { std::vector<float> wpts, ppts; { std::lock_guard<std::mutex> l(g_scanMx); if (win.scan < (int)g_scans.size() && g_scans[win.scan].scan) { IScan* ws = g_scans[win.scan].scan; const auto& ST = ws->getScanTransformation().m; for (int k : win.frames) { if (k >= ws->getSize()) continue; double M[4][4]; mul44(ST, ws->getTransformation(k).m, M); framePointsT(ws->getElement(k), M, 10, wpts); } } }
             { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempTex) for (int j = std::max(0, g_tempTex->getSize() - 3); j < g_tempTex->getSize(); j++) { double M[4][4]; mul44(T, g_tempTex->getTransformation(j).m, M); framePointsT(g_tempTex->getElement(j), M, 25, ppts); } }
             if (wpts.size() >= 300 && ppts.size() >= 60) { feat::Grid g; g.build(std::move(wpts), 2.0f); double I[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, z[3] = {0, 0, 0}; g.check(ppts, I, z, 6.0f, share, med); } }
           // 16:28: the surface check reported 0 % for finds that the post-Stop auto-align then confirmed (both moved the
@@ -525,16 +571,16 @@ static void runPositionSearch() {
       IModel* in = nullptr; createModel(&in); { std::lock_guard<std::mutex> l(g_scanMx); for (int i = (int)g_scans.size() - 1; i >= 0; i--) { auto& s = g_scans[i]; if (!(s.visible && s.scan && s.ref && (s.group < 0 || g_groups[s.group].visible))) continue; s.ref->setScanTransformation(s.scan->getScanTransformation()); in->add(s.ref); break; } }
       int nref = in->getSize(); if (nref == 0) { in->release(); probe->release(); g_lastSearch = clk::now(); g_searchBusy = false; return; } in->add(probe);
       IModel* out = nullptr; createModel(&out); alg::AutoAlignSettings as; as.scannerType = probe->getScannerType(); alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createAutoalignAlgorithm(&a, &as);
-      auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = executeJob(a, &ws); a->release(); }
+      auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(a, &ws, 20, "position search", &g_searchStop); a->release(); }
       bool found = false; double T[4][4];
       if (ec == ErrorCode_OK && out->getSize() == 2) { double Rin[4][4], Rout[4][4], Pout[4][4], Rinv[4][4], tmp[4][4]; memcpy(Rin, in->getElement(0)->getScanTransformation().m, sizeof Rin); memcpy(Rout, out->getElement(0)->getScanTransformation().m, sizeof Rout); memcpy(Pout, out->getElement(1)->getScanTransformation().m, sizeof Pout);
         invRigid(Rout, Rinv); mul44(Rinv, Rin, tmp); mul44(tmp, Pout, T); found = !isIdentity(out->getElement(0)->getScanTransformation().m) || !isIdentity(out->getElement(1)->getScanTransformation().m); }
-      double secs = std::chrono::duration<double>(clk::now() - t0).count(); float share = 0, med = 99;
-      if (found && !wins.empty()) { std::vector<float> wpts, ppts; { std::lock_guard<std::mutex> l(g_scanMx); int latest = wins[0].scan; if (latest < (int)g_scans.size() && g_scans[latest].scan) { IScan* ws = g_scans[latest].scan; const auto& ST = ws->getScanTransformation().m; int tw = 0; for (auto& win : wins) { if (win.scan != latest || tw++ >= 3) break; for (int k : win.frames) { double M[4][4]; mul44(ST, ws->getTransformation(k).m, M); framePointsT(ws->getElement(k), M, 10, wpts); } } } }
+      double secs = std::chrono::duration<double>(clk::now() - t0).count(); float share = 0, med = 99, flat = 0;
+      if (found && !wins.empty()) { std::vector<float> wpts, ppts; { std::lock_guard<std::mutex> l(g_scanMx); int latest = wins[0].scan; if (latest < (int)g_scans.size() && g_scans[latest].scan) { IScan* ws = g_scans[latest].scan; const auto& ST = ws->getScanTransformation().m; int tw = 0; for (auto& win : wins) { if (win.scan != latest || tw++ >= 3) break; for (int k : win.frames) { if (k >= ws->getSize()) continue; double M[4][4]; mul44(ST, ws->getTransformation(k).m, M); framePointsT(ws->getElement(k), M, 10, wpts); } } } }
         for (int j = std::max(0, probe->getSize() - 3); j < probe->getSize(); j++) { double M[4][4]; mul44(T, probe->getTransformation(j).m, M); framePointsT(probe->getElement(j), M, 25, ppts); }
-        if (wpts.size() >= 300 && ppts.size() >= 60) { feat::Grid g; g.build(std::move(wpts), 2.0f); double I[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, z[3] = {0, 0, 0}; g.check(ppts, I, z, 6.0f, share, med); } }
-      bool ok = found && share >= 0.3f && med <= 2.5f;
-      logf("position search #%d (local geometry auto-align vs the previous pass): 0x%08X in %.1f s, probe frames %d -> %s (surface %.0f%% within 6 mm, median %.1f mm)", ++g_searchTries, (unsigned)ec, secs, probe->getSize(), ok ? "FOUND" : found ? "match off the end of the previous pass - rejected" : "not found", share * 100, med);
+        if (wpts.size() >= 300 && ppts.size() >= 60) { flat = logic::planeRms(wpts); feat::Grid g; g.build(std::move(wpts), 2.0f); double I[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, z[3] = {0, 0, 0}; g.check(ppts, I, z, 6.0f, share, med); } }
+      logic::GateResult gate = logic::acceptJoin(share, med, true, flat); bool ok = found && gate.ok;   // review D1: geometry-only placement refused on a near-flat window
+      logf("position search #%d (local geometry auto-align vs the previous pass): 0x%08X in %.1f s, probe frames %d -> %s (surface %.0f%% within 6 mm, median %.1f mm, window flatness %.1f mm)", ++g_searchTries, (unsigned)ec, secs, probe->getSize(), ok ? "FOUND" : found ? gate.why : "not found", share * 100, med, flat);
       if (ok) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
       out->release(); in->release(); probe->release(); g_lastSearch = clk::now(); g_searchBusy = false; return; }
     // 0) image-feature search (FS build): recognise the place the latest textured probe frame shows in any earlier pass
@@ -569,7 +615,7 @@ static void runPositionSearch() {
         s.ref->setScanTransformation(s.scan->getScanTransformation()); in->add(s.ref); taken++; } }
     int nref = in->getSize(); in->add(probe);
     IModel* out = nullptr; createModel(&out); alg::AutoAlignSettings as; as.scannerType = probe->getScannerType(); alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createAutoalignAlgorithm(&a, &as);
-    auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = executeJob(a, &ws); a->release(); }
+    auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(a, &ws, 20, "position search", &g_searchStop); a->release(); }
     bool found = false; double T[4][4];
     if (ec == ErrorCode_OK && out->getSize() == nref + 1 && nref > 0) {
       // The SDK may anchor on any scan: express the probe's pose relative to the first reference's ORIGINAL pose,
@@ -649,9 +695,9 @@ static std::wstring nextScanName() {
   for (;;) { wchar_t b[128]; swprintf(b, 128, L"%s %d", base.c_str(), n); bool used = false; for (auto& s : g_scans) if (s.name == b) used = true; if (!used) return b; n++; }
 }
 static std::wstring uniqueName(const std::wstring& base) { std::wstring n = base; int k = 2; for (;;) { bool used = false; for (auto& s : g_scans) if (s.name == n) used = true; if (!used) return n; wchar_t b[160]; swprintf(b, 160, L"%s (%d)", base.c_str(), k++); n = b; } }
-static bool waitPostProcess(double maxSecs); static void startPostProcess(IScan* s, bool optimise);
+static bool waitPostProcess(double maxSecs); static void startPostProcess(IScan* s, bool optimise); static bool postIdle();
 static void duplicateScan(int i) {   // Studio: Duplicate → "Copy of <name>"
-  waitPostProcess(1e9); if (i < 0 || i >= (int)g_scans.size() || !g_scans[i].scan) return; IScan* c = nullptr; createSimilarScan(&c, g_scans[i].scan); if (!c) return; cloneScan(c, g_scans[i].scan);
+  if (!postIdle() || i < 0 || i >= (int)g_scans.size() || !g_scans[i].scan) return; IScan* c = nullptr; createSimilarScan(&c, g_scans[i].scan); if (!c) return; cloneScan(c, g_scans[i].scan);
   ScanRec r; r.scan = c; r.group = g_scans[i].group; r.keyFrames = g_scans[i].keyFrames; r.maxErr = g_scans[i].maxErr; memcpy(r.color, g_scans[i].color, sizeof r.color); setScanName(r, uniqueName(L"Copy of " + g_scans[i].name)); countScanStats(r); buildScanDisplay(r);
   { std::lock_guard<std::mutex> l(g_scanMx); g_scans.insert(g_scans.begin() + i + 1, std::move(r)); } g_dirty = true; startPostProcess(c, false);   // search reference for the copy
 }
@@ -696,13 +742,15 @@ static long long cleanFrame(IFrameMesh* f, double edgeMax = 2.0, int minComp = 3
   IArrayPoint3F* np = nullptr; createArrayPoint3F(&np, nk); IArrayPoint3F* nn = nullptr; if (qn) createArrayPoint3F(&nn, nk); IArrayUVCoordinates* nuv = nullptr; if (ouv) createArrayUVCoordinates(&nuv, nk);
   Point3F* wp = np->getPointer(); Point3F* wn = nn ? nn->getPointer() : nullptr; UVCoordinates* wuv = nuv ? nuv->getPointer() : nullptr; for (int i = 0; i < n; i++) if (keep[i] >= 0) { wp[keep[i]] = q[i]; if (wn) wn[keep[i]] = qn[i]; if (wuv) wuv[keep[i]] = ouv[i]; }
   int ntk = 0; for (int i = 0; i < nt; i++) if (triKeep[i]) ntk++; IArrayIndexTriplet* ntri = nullptr; createArrayIndexTriplet(&ntri, ntk); { IndexTriplet* wt = ntri->getPointer(); int j = 0; for (int i = 0; i < nt; i++) if (triKeep[i]) { IndexTriplet o; o.x = keep[t[i].x]; o.y = keep[t[i].y]; o.z = keep[t[i].z]; wt[j++] = o; } }
-  f->setPoints(np); if (nn) f->setPointsNormals(nn); if (nuv) f->setUVCoordinates(nuv); f->setTriangles(ntri); np->release(); if (nn) nn->release(); if (nuv) nuv->release(); ntri->release(); return removed;
+  unsigned derived = f->getCalculated() & (CM_PolyNormals | CM_PolyAreas | CM_Centers | CM_Angles | CM_EdgeLengths);   // cached per-triangle data of the old mesh (review D6)
+  f->setPoints(np); if (nn) f->setPointsNormals(nn); if (nuv) f->setUVCoordinates(nuv); f->setTriangles(ntri); np->release(); if (nn) nn->release(); if (nuv) nuv->release(); ntri->release();
+  if (derived) { f->clear((int)derived); f->calculate(derived, derived); } return removed;
 }
 static void cleanScan(IScan* s) { auto t0 = clk::now(); long long removed = 0, total = 0; for (int k = 0; k < s->getSize(); k++) { IFrameMesh* f = s->getElement(k); if (!f || !f->getPoints()) continue; total += f->getPoints()->getSize(); removed += cleanFrame(f); }
   // Frames with almost no surface left (scanner pulled away before Stop, or pointed at nothing): Trail11's last 15
   // frames had 300–2000 points against 50 000 normally and sat 4–9 mm off. Drop frames under 10 % of the scan's median.
   std::vector<int> cnt; for (int k = 0; k < s->getSize(); k++) { IFrameMesh* f = s->getElement(k); cnt.push_back(f && f->getPoints() ? f->getPoints()->getSize() : 0); } std::vector<int> sorted = cnt; std::sort(sorted.begin(), sorted.end()); int med = sorted.empty() ? 0 : sorted[sorted.size() / 2]; int dropped = 0;
-  if (med > 0 && s->getSize() > 3) for (int k = s->getSize() - 1; k >= 0 && s->getSize() > 3; k--) if (cnt[k] < med / 10) { s->remove(k); dropped++; }
+  if (med > 0 && s->getSize() > 3) { std::lock_guard<std::mutex> l(g_scanMx); for (int k = s->getSize() - 1; k >= 0 && s->getSize() > 3; k--) if (cnt[k] < med / 10) { s->remove(k); dropped++; } }   // under the lock: prepareRecording reads the last frame (review C7)
   logf("frame cleaning: removed %.1f%% of %lld points (bridging triangles, floating patches)%s in %.1f s", total ? 100.0 * removed / total : 0, total, dropped ? (", dropped " + std::to_string(dropped) + " near-empty frames").c_str() : "", std::chrono::duration<double>(clk::now() - t0).count()); }
 // Pass refinement (4 Nov, Trail12): the live placement of a new pass was 10–21 mm off (one letter row) while Studio
 // joins the same passes perfectly. After a placed pass is registered, it is refined as one rigid body by point-to-
@@ -727,34 +775,40 @@ static bool step(const std::vector<float>& P, const Model& M, double R[3][3], do
   double R2[3][3], t2[3]; for (int r = 0; r < 3; r++) { for (int cc = 0; cc < 3; cc++) R2[r][cc] = K[r][0] * R[0][cc] + K[r][1] * R[1][cc] + K[r][2] * R[2][cc]; t2[r] = K[r][0] * t[0] + K[r][1] * t[1] + K[r][2] * t[2] + x[3 + r]; }
   memcpy(R, R2, sizeof R2); memcpy(t, t2, sizeof t2); return true;
 }
-static void worldPts(IScan* s, int frameStep, int ptStep, bool withN, std::vector<float>& P, std::vector<float>* Nn) { const auto& ST = s->getScanTransformation().m; for (int k = 0; k < s->getSize(); k += frameStep) { IFrameMesh* f = s->getElement(k); if (!f || !f->getPoints()) continue; if (withN && !f->hasPointsNormals()) continue; double M[4][4]; mul44(ST, s->getTransformation(k).m, M); const Point3F* q = f->getPoints()->getPointer(); const Point3F* qn = withN ? f->getPointsNormals()->getPointer() : nullptr; int n = f->getPoints()->getSize();
+static void worldPts(IScan* s, int frameStep, int ptStep, bool withN, std::vector<float>& P, std::vector<float>* Nn, const double (*STo)[4] = nullptr) { Matrix4x4D STm = s->getScanTransformation(); const double (*ST)[4] = STo ? STo : STm.m; for (int k = 0; k < s->getSize(); k += frameStep) { IFrameMesh* f = s->getElement(k); if (!f || !f->getPoints()) continue; if (withN && !f->hasPointsNormals()) continue; double M[4][4]; mul44(ST, s->getTransformation(k).m, M); const Point3F* q = f->getPoints()->getPointer(); const Point3F* qn = withN ? f->getPointsNormals()->getPointer() : nullptr; int n = f->getPoints()->getSize();
     for (int i = 0; i < n; i += ptStep) { double x = q[i].x, y = q[i].y, z = q[i].z; P.push_back((float)(M[0][0] * x + M[0][1] * y + M[0][2] * z + M[0][3])); P.push_back((float)(M[1][0] * x + M[1][1] * y + M[1][2] * z + M[1][3])); P.push_back((float)(M[2][0] * x + M[2][1] * y + M[2][2] * z + M[2][3]));
       if (Nn && qn) { double a = qn[i].x, b = qn[i].y, c = qn[i].z; Nn->push_back((float)(M[0][0] * a + M[0][1] * b + M[0][2] * c)); Nn->push_back((float)(M[1][0] * a + M[1][1] * b + M[1][2] * c)); Nn->push_back((float)(M[2][0] * a + M[2][1] * b + M[2][2] * c)); } } } }
 // Refine scan `s` (world pose = its scan transformation) against the references of the other visible scans.
 // Returns true and the corrected scan transformation in `out`.
-static bool refine(IScan* s, Matrix4x4D& out, double& moved, double& rms) {
-  Model M; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) { if (rec.scan == s || !rec.visible || !rec.ref || (rec.group >= 0 && !g_groups[rec.group].visible)) continue; IScan* ref = rec.ref; Matrix4x4D st = rec.scan->getScanTransformation(); ref->setScanTransformation(st); worldPts(ref, 1, 10, true, M.pts, &M.nrm); } }   // every 10th point (58 s at every 4th, 16:36)
+// Review D2/C10: the reference scans are read with their owner's pose passed in (the shared reference object is no
+// longer moved, the search uses it too); the result reports rotation and the share of points matched within 2 mm, and
+// the caller accepts it only within logic::acceptRefine limits.
+static bool refine(IScan* s, Matrix4x4D& out, double& moved, double& rms, double& rotDeg, double& share) {
+  Model M; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) { if (rec.scan == s || !rec.visible || !rec.ref || !rec.scan || (rec.group >= 0 && rec.group < (int)g_groups.size() && !g_groups[rec.group].visible)) continue; Matrix4x4D st = rec.scan->getScanTransformation(); worldPts(rec.ref, 1, 10, true, M.pts, &M.nrm, st.m); } }   // every 10th point (58 s at every 4th, 16:36)
   if (M.pts.size() < 3000 * 3) return false; M.build(); std::vector<float> P; worldPts(s, std::max(1, s->getSize() / 25), 30, false, P, nullptr); if (P.size() < 1500 * 3) return false;
   double R[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, t[3] = {0, 0, 0}; int matched = 0; bool ok = true; rms = 0; for (int it = 0; it < 18 && ok; it++) ok = step(P, M, R, t, it < 4 ? 15.0f : it < 9 ? 6.0f : 2.0f, rms, matched); if (!ok) return false;
-  const auto& ST = s->getScanTransformation().m; double C[4][4]; for (int r = 0; r < 3; r++) { for (int c = 0; c < 3; c++) C[r][c] = R[r][c]; C[r][3] = t[r]; } C[3][0] = C[3][1] = C[3][2] = 0; C[3][3] = 1; double N[4][4]; mul44(C, ST, N); memcpy(out.m, N, sizeof N); moved = sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]); return true;
+  Matrix4x4D STm = s->getScanTransformation(); const auto& ST = STm.m; double C[4][4]; for (int r = 0; r < 3; r++) { for (int c = 0; c < 3; c++) C[r][c] = R[r][c]; C[r][3] = t[r]; } C[3][0] = C[3][1] = C[3][2] = 0; C[3][3] = 1; double N[4][4]; mul44(C, ST, N); memcpy(out.m, N, sizeof N);
+  // moved = how far the pass's centre moves (the ICP translation alone is about the world origin, metres away)
+  double cx = 0, cy = 0, cz = 0; size_t np = P.size() / 3; for (size_t i = 0; i < np; i++) { cx += P[i * 3]; cy += P[i * 3 + 1]; cz += P[i * 3 + 2]; } if (np) { cx /= np; cy /= np; cz /= np; }
+  double nx = R[0][0] * cx + R[0][1] * cy + R[0][2] * cz + t[0] - cx, ny = R[1][0] * cx + R[1][1] * cy + R[1][2] * cz + t[1] - cy, nz = R[2][0] * cx + R[2][1] * cy + R[2][2] * cz + t[2] - cz;
+  moved = sqrt(nx * nx + ny * ny + nz * nz); rotDeg = logic::rotationDeg(R); share = np ? (double)matched / np : 0; return true;
 }
 } // namespace pa
 // 5 Nov 14:21: global registration of a 328-frame pass never returned (normally ~10 s); the auto-align after the next
 // pass waited for it and the window locked ("Not Responding") until the team killed ArtecRec. Each tidy-up step after
 // a scan now has a time limit: past it the job is cancelled through its token and the scan is kept as it was.
-template <class J> static ErrorCode execLimited(J* job, AlgorithmWorkset* ws, int maxSecs, const char* what) {
-  ICancellationTokenSource* cts = nullptr; createCancellationTokenSource(&cts); if (cts) ws->cancellation = cts->getToken();
-  std::atomic<bool> fin{false}, gaveUp{false};
-  std::thread wd([&] { for (int i = 0; i < maxSecs * 10 && !fin.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(100)); if (!fin.load() && cts) { gaveUp = true; cts->cancel(); logf("%s: no result in %d s, cancelled; scan kept as it was", what, maxSecs); } });
-  ErrorCode ec = executeJob(job, ws); fin = true; wd.join(); ws->cancellation = nullptr; if (cts) cts->release();
-  return gaveUp.load() && ec == ErrorCode_OK ? ErrorCode_OperationAborted : ec;
-}
-static void postProcessScan(IScan* s, bool optimise) {   // s carries one reference for this thread
-  g_postBusy++; g_optimising = optimise; auto t0 = clk::now(); int nf = s->getSize(); IScan* r = nullptr;
+// At most 3 tidy-up threads work at once (review E2: opening a 40-scan project started 40 full clones together).
+struct PostGate { std::mutex m; std::condition_variable cv; int n = 0; void enter() { std::unique_lock<std::mutex> l(m); cv.wait(l, [&] { return n < 3; }); n++; } void leave() { { std::lock_guard<std::mutex> l(m); n--; } cv.notify_one(); } };
+static PostGate g_postGate;
+static void postProcessScan(IScan* s, bool optimise) {   // s carries one reference for this thread; g_postBusy was raised by startPostProcess
+  g_postGate.enter(); auto t0 = clk::now(); int nf = s->getSize(); IScan* r = nullptr;
   if (optimise && nf >= 1) {
-    // publish first, then let a search already in flight finish (it may be reading this scan), then clean
-    g_cleaningScan = s; for (int w = 0; w < 200 && g_searchBusy.load(); w++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    cleanScan(s); g_cleaningScan = nullptr; nf = s->getSize();
+    // publish first, then let a search already in flight finish (it may be reading this scan); if it does not finish in
+    // 20 s, skip cleaning rather than rewrite frames under it (review C7)
+    { std::lock_guard<std::mutex> l(g_cleanMx); g_cleaning.push_back(s); }
+    int w = 0; for (; w < 400 && g_searchBusy.load(); w++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (!g_searchBusy.load()) cleanScan(s); else logf("frame cleaning skipped: the position search is still running");   // cleanScan takes the scan lock only while removing frames (C7)
+    { std::lock_guard<std::mutex> l(g_cleanMx); g_cleaning.erase(std::remove(g_cleaning.begin(), g_cleaning.end(), s), g_cleaning.end()); } nf = s->getSize();
     // search reference right away (instant clone): after a loss mid-pass the search must compare against THIS scan,
     // not the one before it; the reference used to arrive only after registration + refinement, 10–20 s later
     // (5 Nov 11:03: second recovery failed, searched against scan 1 while the scanner was over the end of scan 2).
@@ -782,41 +836,55 @@ static void postProcessScan(IScan* s, bool optimise) {   // s carries one refere
       if (eg == ErrorCode_OK && go->getSize() > 0 && go->getElement(0) && go->getElement(0)->getSize() == nf) { IScan* g = go->getElement(0); g->addRef(); g->setScanTransformation(src->getScanTransformation()); if (src->getName()) g->setName(src->getName()); if (r) r->release(); r = g; logf("global registration (geometry) of %d frames in %.1f s", nf, dg); }
       else logf("global registration failed 0x%08X in %.1f s; scan kept", (unsigned)eg, dg);
       gi->release(); go->release(); } }
-  g_optimising = false;
-  // pass refinement for a scan the live search placed (its pose is a guess from a few frames): rigid ICP against the other scans
+  // pass refinement for a scan the live search placed (its pose is a guess from a few frames): rigid ICP against the other
+  // scans, accepted only within limits (review D2: a 6.6 mm move was applied unchecked on 5 Nov)
   if (optimise && r && nf >= 3) { bool placed = false; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) if (rec.scan == s) placed = rec.placed; }
-    if (placed) { auto tr = clk::now(); Matrix4x4D nT; double moved = 0, rms = 0; if (pa::refine(r, nT, moved, rms)) { r->setScanTransformation(nT); logf("pass refinement: moved %.1f mm, residual %.2f mm, %.1f s", moved, rms, std::chrono::duration<double>(clk::now() - tr).count()); } else logf("pass refinement: no overlap found with the other scans (%.1f s)", std::chrono::duration<double>(clk::now() - tr).count()); } }
+    if (placed) { auto tr = clk::now(); Matrix4x4D nT; double moved = 0, rms = 0, rot = 0, share = 0; double secs = 0;
+      if (pa::refine(r, nT, moved, rms, rot, share)) { secs = std::chrono::duration<double>(clk::now() - tr).count(); logic::RefineVerdict v = logic::acceptRefine(moved, rot, share);
+        if (v.ok) { r->setScanTransformation(nT); logf("pass refinement: moved %.1f mm, turned %.2f deg, %.0f%% of points within 2 mm (residual %.2f mm), %.1f s", moved, rot, share * 100, rms, secs); }
+        else { logf("pass refinement rejected: %s (moved %.1f mm, turned %.2f deg, %.0f%% matched); the pass keeps its live position", v.why, moved, rot, share * 100); g_alignMsg = std::wstring(L"a join could not be tightened - check it on screen"); } }
+      else logf("pass refinement: no overlap found with the other scans (%.1f s)", std::chrono::duration<double>(clk::now() - tr).count()); } }
   PostResult* pr = new PostResult(); pr->src = s; pr->res = r ? r : s; ScanRec tmp; tmp.scan = pr->res; buildScanDisplay(tmp); pr->disp = std::move(tmp.disp); memcpy(pr->texAvg, tmp.texAvg, sizeof pr->texAvg); pr->hasTexAvg = tmp.hasTexAvg; tmp.scan = nullptr;
   pr->ref = nf >= 3 ? buildRef(pr->res, 40) : nullptr;
   if (g_featSearch && nf >= 3) pr->feats = buildFeats(pr->res, 40);
-  PostMessageW(g_hwnd, WM_POSTDONE, 0, (LPARAM)pr); g_postBusy--;
+  g_postGate.leave();
+  if (!PostMessageW(g_hwnd, WM_POSTDONE, 0, (LPARAM)pr)) { logf("tidy-up result could not be delivered (window gone)"); }
 }
-static void startPostProcess(IScan* s, bool optimise = true) { s->addRef(); std::lock_guard<std::mutex> l(g_postMx); g_postThreads.emplace_back(postProcessScan, s, optimise); }
-static bool waitPostProcess(double maxSecs) { auto t0 = clk::now(); while (g_postBusy.load() > 0) { if (std::chrono::duration<double>(clk::now() - t0).count() > maxSecs) return false; MSG m; while (PeekMessageW(&m, nullptr, WM_POSTDONE, WM_POSTDONE, PM_REMOVE)) DispatchMessageW(&m); Sleep(30); } return true; }   // before save / align / duplicate
+// Review C3/A3/E3: the busy count is raised here, on the UI thread, before the thread exists, and lowered by
+// onPostDone on the UI thread after the result is swapped in. postIdle() is therefore exact: no queued result exists.
+// Threads are detached: each holds its own references, and nothing waits for them at exit (review B6).
+static void startPostProcess(IScan* s, bool optimise = true) { s->addRef(); g_postBusy++; g_optimising = true; std::thread(postProcessScan, s, optimise).detach(); }
+static bool postIdle() { return g_postBusy.load() == 0; }
+static bool waitPostProcess(double maxSecs) { auto t0 = clk::now(); while (g_postBusy.load() > 0) { if (std::chrono::duration<double>(clk::now() - t0).count() > maxSecs) return false; MSG m; while (PeekMessageW(&m, nullptr, WM_POSTDONE, WM_POSTDONE, PM_REMOVE)) DispatchMessageW(&m); Sleep(30); } return true; }   // used only where the UI already guarantees idle
 static void rebuildMaster();
 static void onPostDone(PostResult* pr) {   // UI thread
   { std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) if (rec.scan == pr->src) { if (pr->res != pr->src) { rec.scan->release(); rec.scan = pr->res; pr->res = nullptr; } rec.disp = std::move(pr->disp); memcpy(rec.texAvg, pr->texAvg, sizeof rec.texAvg); rec.hasTexAvg = pr->hasTexAvg; if (rec.ref) rec.ref->release(); rec.ref = pr->ref; pr->ref = nullptr; rec.feats = std::move(pr->feats); countScanStats(rec); break; } }
   bool changed = pr->res == nullptr;   // a replaced (fine-registered) scan modifies the project; a display/reference build alone does not
   if (pr->ref) pr->ref->release(); if (pr->res && pr->res != pr->src) pr->res->release(); pr->src->release(); delete pr; rebuildMaster(); if (changed) g_dirty = true;
+  if (g_postBusy.load() > 0) g_postBusy--; g_optimising = g_postBusy.load() > 0;
 }
 // Called on the UI thread when the scanning job has ended: move recorded scans into the master model.
 static int onJobDone() {
   if (g_job.joinable()) g_job.join(); int added = 0;
   if (g_jobOut) {
-    if (g_searchThread.joinable()) g_searchThread.join();
+    g_searchStop = true; if (g_searchThread.joinable()) g_searchThread.join(); g_searchBusy = false;   // review B1: stopped, so the join is short
+    // review C6: one pose per segment (Pause/Resume); the last segment's state is still live
+    std::vector<logic::SegmentPose> poses = g_segPoses; pushSegmentPose(); poses.push_back(g_segPoses.back()); g_segPoses.clear();
+    bool perSegment = (int)poses.size() == g_jobOut->getSize();
     for (int i = 0; i < g_jobOut->getSize(); i++) { IScan* s = g_jobOut->getElement(i); if (!s || s->getSize() <= 0) continue;
+      bool found = perSegment ? poses[i].found : (i == 0 && poses.back().found); const double (*PT)[4] = perSegment ? poses[i].T : poses.back().T;
       if (s->getSize() < 10) { logf("scan with %d frame(s) discarded", s->getSize()); continue; }   // the stub left by a loss within seconds of a restart is useless (3 Nov: 3- and 9-frame scans)
-      if (g_alignLive.load() && g_liveFound.load() && i == 0) { Matrix4x4D T; { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(T.m, g_liveT, sizeof g_liveT); } s->setScanTransformation(T);
+      if (found) { Matrix4x4D T; memcpy(T.m, PT, sizeof T.m); s->setScanTransformation(T);
         // 5 Nov: the frames recorded while searching belong to the same continuous tracking as the rest of this scan, so
         // the found pose places them too — keep them (they were discarded before, losing a few seconds per join).
         logf("scan placed with the position found live; %d search frames kept", (int)g_foundAt.load()); }
-      if (g_alignLive.load() && !g_liveFound.load()) logf("position was not found during this scan; it keeps its own coordinates");
-      ScanRec r; r.scan = s; r.placed = g_alignLive.load() && g_liveFound.load() && i == 0; setScanName(r, nextScanName()); r.keyFrames = (int)g_keyFrames.load(); r.maxErr = g_maxErr.load(); countScanStats(r);
+      if (g_alignLive.load() && !found) logf("position was not found during this scan; it keeps its own coordinates");
+      ScanRec r; r.scan = s; r.placed = found; setScanName(r, nextScanName()); r.keyFrames = (int)g_keyFrames.load(); r.maxErr = g_maxErr.load(); countScanStats(r);
       // Studio groups a scan that was placed by the live search with the scan it was placed against (the most recent
       // visible one). The old "group with the scan that ended at the loss" rule left 1-scan groups when the resumed
       // scan was a discarded stub (3 Nov 16:52 screenshot).
       if (r.placed) { int ref = -1; for (int k = (int)g_scans.size() - 1; k >= 0; k--) if (g_scans[k].visible && g_scans[k].scan) { ref = k; break; }
-        if (ref >= 0) { auto& prev = g_scans[ref]; if (prev.group < 0) { GroupRec g; wchar_t nm[64]; swprintf(nm, 64, L"Group %d", (int)g_groups.size() + 1); g.name = nm; g_groups.push_back(g); prev.group = (int)g_groups.size() - 1; } r.group = prev.group; } }
+        if (ref >= 0) { std::lock_guard<std::mutex> l(g_scanMx); auto& prev = g_scans[ref]; if (prev.group < 0) { GroupRec g; wchar_t nm[64]; swprintf(nm, 64, L"Group %d", (int)g_groups.size() + 1); g.name = nm; g_groups.push_back(g); prev.group = (int)g_groups.size() - 1; } r.group = prev.group; } }   // under the lock: tidy-up threads read g_groups (review C5)
       s->addRef(); g_master->add(s); { std::lock_guard<std::mutex> l(g_scanMx); g_scans.push_back(std::move(r)); } added++; g_dirty = true; }
     g_resumeGroupWith = -1;
     if (added >= 2) {   // Pause/Resume inside one recording yields several scans; Studio groups them automatically
@@ -828,6 +896,8 @@ static int onJobDone() {
   if (g_proc) { g_proc->release(); g_proc = nullptr; }
   { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { g_tempScan->release(); g_tempScan = nullptr; } if (g_tempTex) { g_tempTex->release(); g_tempTex = nullptr; } } g_alignLive = false;
   logf("procedure finished 0x%08X, scans added %d, frames %ld, scans in project %d", (unsigned)g_jobEc.load(), added, g_frames.load(), (int)g_scans.size());
+  // review A6: say so when a recording ended in an error or left nothing (only the log knew before)
+  if (g_jobEc.load() != ErrorCode_OK && !added && g_frames.load() > 0) notice(L"The last recording ended with a scanner error and nothing could be kept. Check the scanner and record again.");
   { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); g_live = FrameMesh(); g_hist.clear(); g_histKey.clear(); g_histKeys.clear(); }
   for (int i = (int)g_scans.size() - added; i < (int)g_scans.size(); i++) startPostProcess(g_scans[i].scan);   // fine registration + display build off the UI thread
   g_mode = M_Idle; return added;
@@ -835,74 +905,82 @@ static int onJobDone() {
 // Rebuild g_master from g_scans (after delete / reorder / align).
 static void rebuildMaster() { g_master->clear(); for (auto& r : g_scans) if (r.scan) g_master->add(r.scan); }
 
-static std::thread g_alignThread;
+static std::thread g_alignThread; static std::atomic<int> g_alignGen{0}; static clk::time_point g_alignStart; static bool g_pendingAlign = false;
+// Review B2/C1/C9: auto-align never waits on the UI thread. It starts only when no scan is being tidied (otherwise it is
+// queued: g_pendingAlign, run from the timer); it works on its own references to the scans and applies the results to
+// the records holding the same scan objects (not by index); display meshes are rebuilt outside the scan lock.
 static void runAutoAlign() {   // aligns the visible scans to each other (Studio: "Auto-align new scans with those marked in Workspace")
-  // never lock the window for good: if a scan is still being tidied after 3 min (the limits above should prevent it), skip
-  if (!waitPostProcess(180)) { logf("auto-align skipped: a scan is still being processed after 3 min"); g_alignMsg = L"auto-align skipped (still processing a scan) - press Auto-align later"; return; }
-  g_mode = M_Aligning; g_alignMsg = L"aligning…";
-  g_alignThread = std::thread([] {
-    IModel* in = nullptr; createModel(&in); std::vector<int> map; for (int i = 0; i < (int)g_scans.size(); i++) if (g_scans[i].visible && g_scans[i].scan) { ensureNormals(g_scans[i].scan); in->add(g_scans[i].scan); map.push_back(i); }
-    ErrorCode ec = ErrorCode_OK; double secs = 0; IModel* out = nullptr; createModel(&out);
+  if (!postIdle() || g_mode.load() != M_Idle) { g_pendingAlign = true; return; }
+  g_pendingAlign = false; g_mode = M_Aligning; g_alignMsg = L"aligning..."; g_alignStart = clk::now(); int gen = ++g_alignGen;
+  if (g_alignThread.joinable()) g_alignThread.detach();
+  struct Item { IScan* s; bool placed; std::wstring name; };
+  std::vector<Item> items; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.visible && r.scan) { r.scan->addRef(); items.push_back({r.scan, r.placed, r.name}); } }
+  g_alignThread = std::thread([items, gen] {
+    IModel* in = nullptr; createModel(&in); for (auto& it : items) { ensureNormals(it.s); in->add(it.s); }
+    ErrorCode ec = ErrorCode_OK; double secs = 0; IModel* out = nullptr; createModel(&out); int moved = 0;
+    struct Moved { IScan* s; Matrix4x4D T; }; std::vector<Moved> moves;
     if (in->getSize() >= 2) {
       alg::AutoAlignSettings as; as.scannerType = in->getElement(0)->getScannerType(); alg::IAlgorithm* a = nullptr; ec = alg::createAutoalignAlgorithm(&a, &as);
-      // 5 Nov 14:26: auto-align of a 297-frame pass ran 6+ minutes (normally 2–15 s) with the buttons locked, until the
-      // team killed ArtecRec. Give it 60 s, then cancel through the job's cancellation token.
-      bool gaveUp = false;
-      auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency();
-        ICancellationTokenSource* acts = nullptr; createCancellationTokenSource(&acts); if (acts) ws.cancellation = acts->getToken();
-        std::atomic<bool> fin{false}; std::thread wd([&] { for (int i = 0; i < 600 && !fin.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(100)); if (!fin.load() && acts) { gaveUp = true; acts->cancel(); logf("auto-align: no result in 60 s, cancelled"); } });
-        ec = executeJob(a, &ws); fin = true; wd.join(); if (acts) acts->release(); a->release(); }
+      // 5 Nov 14:26: auto-align of a 297-frame pass ran 6+ minutes (normally 2-15 s) with the buttons locked. 60 s limit.
+      auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(a, &ws, 60, "auto-align"); a->release(); }
       secs = std::chrono::duration<double>(clk::now() - t0).count();
-      if (gaveUp && ec == ErrorCode_OK) ec = ErrorCode_OperationAborted;
-      int moved = 0;
-      // 4 Nov 16:57: the SDK moved scan 6, which the live search had placed and the refinement had tightened to 0.24 mm,
-      // by 24 cm. Scans already placed are anchors: their returned transforms are not applied; an unplaced scan's
-      // transform is expressed relative to the first placed scan's returned pose (as the live search does), so the
-      // anchors stay put and only the new scans move.
-      if (ec == ErrorCode_OK && out->getSize() == in->getSize()) { std::lock_guard<std::mutex> l(g_scanMx);
-        int anchor = -1; for (int k = 0; k < (int)map.size(); k++) if (g_scans[map[k]].placed) { anchor = k; break; }
+      // 4 Nov 16:57: scans already placed are anchors: their returned transforms are not applied; an unplaced scan's
+      // transform is expressed relative to the first placed scan's returned pose, so the anchors stay put.
+      if (ec == ErrorCode_OK && out->getSize() == in->getSize()) {
+        int anchor = -1; for (int k = 0; k < (int)items.size(); k++) if (items[k].placed) { anchor = k; break; }
         double Ain[4][4], Aout[4][4], Ainv[4][4], Afix[4][4]; if (anchor >= 0) { memcpy(Ain, in->getElement(anchor)->getScanTransformation().m, sizeof Ain); memcpy(Aout, out->getElement(anchor)->getScanTransformation().m, sizeof Aout); invRigid(Aout, Ainv); mul44(Ain, Ainv, Afix); }
-        for (int k = 0; k < (int)map.size(); k++) { IScan* s = out->getElement(k); auto& rec = g_scans[map[k]];
-          if (rec.placed) { logf("auto-align: scan %d \"%ls\" kept (placed earlier)", map[k] + 1, rec.name.c_str()); continue; }
-          Matrix4x4D T = s->getScanTransformation(); if (anchor >= 0) { double N[4][4]; mul44(Afix, T.m, N); memcpy(T.m, N, sizeof N); }
+        for (int k = 0; k < (int)items.size(); k++) { if (items[k].placed) { logf("auto-align: scan %d \"%ls\" kept (placed earlier)", k + 1, items[k].name.c_str()); continue; }
+          Matrix4x4D T = out->getElement(k)->getScanTransformation(); if (anchor >= 0) { double N[4][4]; mul44(Afix, T.m, N); memcpy(T.m, N, sizeof N); }
           const auto& Tin = in->getElement(k)->getScanTransformation().m; double d = sqrt((T.m[0][3] - Tin[0][3]) * (T.m[0][3] - Tin[0][3]) + (T.m[1][3] - Tin[1][3]) * (T.m[1][3] - Tin[1][3]) + (T.m[2][3] - Tin[2][3]) * (T.m[2][3] - Tin[2][3])); bool mv = d > 0.01;
-          if (mv) { moved++; rec.scan->setScanTransformation(T); buildScanDisplay(rec); } logf("auto-align: scan %d \"%ls\" %s (moved %.1f mm)", map[k] + 1, rec.name.c_str(), mv ? "moved" : "kept", d); } }
+          if (mv) { moved++; moves.push_back({items[k].s, T}); } logf("auto-align: scan %d \"%ls\" %s (moved %.1f mm)", k + 1, items[k].name.c_str(), mv ? "moved" : "kept", d); } }
       logf("auto-align 0x%08X in %.1f s (in %d, out %d, scans with a transform %d)", (unsigned)ec, secs, in->getSize(), out->getSize(), moved);
-      // The SDK returns OK even when RANSAC found nothing: then no scan has a transform. Which scan it chose to move
-      // is its own business (3 Nov, trail2: it moved the OLDER scan and ArtecRec wrongly reported a failure).
-      if (ec == ErrorCode_OK && map.size() >= 2 && moved == 0) ec = ErrorCode_OperationFailed;
+      // The SDK returns OK even when RANSAC found nothing: then no scan has a transform.
+      if (ec == ErrorCode_OK && items.size() >= 2 && moved == 0) ec = ErrorCode_OperationFailed;
     }
     out->release(); in->release();
-    wchar_t m[80]; if (ec == ErrorCode_OK) swprintf(m, 80, L"aligned in %.0f s", secs); else if (ec == ErrorCode_OperationFailed) wcscpy(m, L"could not align the new scan (too little overlap)"); else if (ec == ErrorCode_OperationAborted) wcscpy(m, L"auto-align gave up after 60 s (too little overlap?)"); else swprintf(m, 80, L"align failed (0x%08X)", (unsigned)ec); g_alignMsg = m; PostMessageW(g_hwnd, WM_ALIGNDONE, 0, 0);
+    if (gen == g_alignGen.load()) {   // not abandoned: apply, then rebuild the moved scans' display outside the lock
+      for (auto& mv : moves) { ScanRec tmp; { std::lock_guard<std::mutex> l(g_scanMx); bool still = false; for (auto& r : g_scans) if (r.scan == mv.s) { r.scan->setScanTransformation(mv.T); r.placed = true; still = true; } if (!still) continue; }
+        tmp.scan = mv.s; buildScanDisplay(tmp); { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.scan == mv.s) { r.disp = std::move(tmp.disp); memcpy(r.texAvg, tmp.texAvg, sizeof r.texAvg); r.hasTexAvg = tmp.hasTexAvg; } } tmp.scan = nullptr; }
+      wchar_t m[96]; if (ec == ErrorCode_OK) swprintf(m, 96, L"aligned in %.0f s", secs); else if (ec == ErrorCode_OperationFailed) wcscpy(m, L"could not align the new scan (too little overlap)"); else if (ec == ErrorCode_OperationAborted) wcscpy(m, L"auto-align gave up after 60 s (too little overlap?)"); else swprintf(m, 96, L"align failed (0x%08X)", (unsigned)ec);
+      g_alignMsg = std::wstring(m); PostMessageW(g_hwnd, WM_ALIGNDONE, (WPARAM)gen, 0); }
+    for (auto& it : items) it.s->release();
   });
 }
-static void onAlignDone() { if (g_alignThread.joinable()) g_alignThread.join(); rebuildMaster(); g_mode = M_Idle; }
+// Review B3: an auto-align that ignores its cancel is abandoned after 90 s so the app is usable and the scans can be saved.
+static bool abandonStuckAlign() { if (g_mode.load() != M_Aligning || std::chrono::duration<double>(clk::now() - g_alignStart).count() < 90) return false; ++g_alignGen; if (g_alignThread.joinable()) g_alignThread.detach(); g_mode = M_Idle; logf("auto-align did not end in 90 s: abandoned"); g_alignMsg = L"auto-align did not finish - check the scans; save the project"; return true; }
+static void onAlignDone(int gen) { if (gen != g_alignGen.load()) return; if (g_alignThread.joinable()) g_alignThread.join(); rebuildMaster(); g_mode = M_Idle; }
 
 // ---------------------------------------------------------------- project
 static std::wstring projDir(const std::wstring& sproj) { size_t sl = sproj.find_last_of(L"\\/"); return sproj.substr(0, sl); }
-static void saveGroups(const std::wstring& sproj) {   // sidecar: groups are not part of the .sproj format
-  FILE* f = _wfopen((projDir(sproj) + L"\\artecrec-groups.txt").c_str(), L"w, ccs=UTF-8"); if (!f) return;
-  for (auto& g : g_groups) fwprintf(f, L"G\t%s\t%d\n", g.name.c_str(), g.visible ? 1 : 0);
-  int i = 0; for (auto& s : g_scans) fwprintf(f, L"S\t%d\t%s\t%d\t%d\t%d\t%.4f\n", i++, s.name.c_str(), s.group, s.visible ? 1 : 0, s.keyFrames, s.maxErr); fclose(f);
+// Writes a whole file through a temporary name and an atomic replace, so a crash mid-write never leaves a broken file
+// (review A5: the .sproj names rewrite and the sidecar used to truncate in place).
+static bool writeFileAtomic(const std::wstring& path, const std::string& bytes) {
+  std::wstring tmp = path + L".tmp"; FILE* f = _wfopen(tmp.c_str(), L"wb"); if (!f) return false; bool ok = fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size(); ok = fflush(f) == 0 && ok; fclose(f);
+  if (!ok) { DeleteFileW(tmp.c_str()); return false; } return MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0; }
+// Sidecar: groups are not part of the .sproj format. Review D4: "placed" (already joined) is saved; D5: each scan line
+// carries its frame count so a reopened project only takes a line that matches its scan.
+static void saveGroups(const std::wstring& sproj) {
+  std::wstring w; wchar_t b[1200];
+  for (auto& g : g_groups) { swprintf(b, 1200, L"G\t%s\t%d\n", g.name.c_str(), g.visible ? 1 : 0); w += b; }
+  int i = 0; for (auto& sc : g_scans) { swprintf(b, 1200, L"S\t%d\t%s\t%d\t%d\t%d\t%.4f\t%d\t%d\n", i++, sc.name.c_str(), sc.group, sc.visible ? 1 : 0, sc.keyFrames, sc.maxErr, sc.placed ? 1 : 0, sc.scan ? sc.scan->getSize() : 0); w += b; }
+  if (!writeFileAtomic(projDir(sproj) + L"\\artecrec-groups.txt", "\xEF\xBB\xBF" + logic::utf8(w))) logf("groups file could not be written");
 }
 static void loadGroups(const std::wstring& sproj) {
-  FILE* f = _wfopen((projDir(sproj) + L"\\artecrec-groups.txt").c_str(), L"r, ccs=UTF-8"); if (!f) return; wchar_t line[1024]; g_groups.clear();
+  FILE* f = _wfopen((projDir(sproj) + L"\\artecrec-groups.txt").c_str(), L"r, ccs=UTF-8"); if (!f) return; wchar_t line[1024]; g_groups.clear(); int skipped = 0;
   while (fgetws(line, 1024, f)) { std::wstring s = line; while (!s.empty() && (s.back() == L'\n' || s.back() == L'\r')) s.pop_back(); std::vector<std::wstring> c; size_t p = 0;
     for (;;) { size_t q = s.find(L'\t', p); c.push_back(s.substr(p, q == std::wstring::npos ? std::wstring::npos : q - p)); if (q == std::wstring::npos) break; p = q + 1; }
     if (c.size() >= 3 && c[0] == L"G") { GroupRec g; g.name = c[1]; g.visible = c[2] == L"1"; g_groups.push_back(g); }
-    else if (c.size() >= 5 && c[0] == L"S") { int i = _wtoi(c[1].c_str()); if (i >= 0 && i < (int)g_scans.size()) { auto& r = g_scans[i]; setScanName(r, c[2]); r.group = _wtoi(c[3].c_str()); r.visible = c[4] == L"1"; if (c.size() > 5) r.keyFrames = _wtoi(c[5].c_str()); if (c.size() > 6) r.maxErr = _wtof(c[6].c_str()); } } }
-  fclose(f); for (auto& r : g_scans) if (r.group >= (int)g_groups.size()) r.group = -1;
+    else if (c.size() >= 5 && c[0] == L"S") { int i = _wtoi(c[1].c_str()); if (i >= 0 && i < (int)g_scans.size()) { auto& r = g_scans[i];
+        if (c.size() > 8 && r.scan && _wtoi(c[8].c_str()) != r.scan->getSize()) { skipped++; continue; }   // not the same scan: leave its Studio name
+        setScanName(r, c[2]); r.group = _wtoi(c[3].c_str()); r.visible = c[4] == L"1"; if (c.size() > 5) r.keyFrames = _wtoi(c[5].c_str()); if (c.size() > 6) r.maxErr = _wtof(c[6].c_str()); if (c.size() > 7) r.placed = c[7] == L"1"; } } }
+  fclose(f); for (auto& r : g_scans) if (r.group >= (int)g_groups.size()) r.group = -1; if (skipped) logf("groups file: %d scan line(s) did not match their scan and were ignored", skipped);
 }
-// The SDK's project writer names scans "Scan 0, 1, …". Rewrite the Name="…" attributes in the .sproj XML (in scan
-// order) to "<group> - <name>" so Studio shows the ArtecRec names and groups.
-static std::string xmlEsc(const std::wstring& w) { char b[512]; wcstombs(b, w.c_str(), 511); b[511] = 0; std::string s; for (char c : std::string(b)) { if (c == '&') s += "&amp;"; else if (c == '"') s += "&quot;"; else if (c == '<') s += "&lt;"; else if (c == '>') s += "&gt;"; else s += c; } return s; }
+// The SDK's project writer names scans "Scan 0, 1, ...". Rewrite the Name="..." attributes in the .sproj XML (in scan
+// order) to "<group> - <name>" so Studio shows the ArtecRec names and groups. UTF-8, atomic (review A5).
 static void writeStudioNames(const std::wstring& sproj) {
   FILE* f = _wfopen(sproj.c_str(), L"rb"); if (!f) return; std::string x; char buf[4096]; size_t n; while ((n = fread(buf, 1, sizeof buf, f)) > 0) x.append(buf, n); fclose(f);
-  size_t pos = 0; int i = 0; std::string out;
-  while (true) { size_t s = x.find("<Scan ", pos); if (s == std::string::npos) break; size_t nm = x.find("Name=\"", s); size_t end = x.find('>', s); if (nm == std::string::npos || nm > end) { pos = end; continue; }
-    size_t q = x.find('"', nm + 6); if (q == std::string::npos) break; std::wstring full = i < (int)g_scans.size() ? (g_scans[i].group >= 0 ? g_groups[g_scans[i].group].name + L" - " + g_scans[i].name : g_scans[i].name) : L"";
-    if (!full.empty()) x.replace(nm + 6, q - nm - 6, xmlEsc(full)); pos = nm + 6; i++; }
-  f = _wfopen(sproj.c_str(), L"wb"); if (!f) return; fwrite(x.data(), 1, x.size(), f); fclose(f); logf("studio names written for %d scans", i);
+  std::vector<std::wstring> names; for (auto& sc : g_scans) names.push_back(sc.group >= 0 && sc.group < (int)g_groups.size() ? g_groups[sc.group].name + L" - " + sc.name : sc.name);
+  int k = logic::rewriteScanNames(x, names); if (!writeFileAtomic(sproj, x)) { logf("studio names could not be written"); return; } logf("studio names written for %d scans", k);
 }
 // Long SDK jobs (save: 287 s for a 4.9 GB project on 2 Nov; open) run in a worker thread while the UI thread pumps
 // messages, so the window keeps drawing and shows progress, as Studio does. Input is guarded by g_mode == M_Busy.
@@ -915,41 +993,59 @@ static ErrorCode runJobPumped(IJob* job, AlgorithmWorkset* ws, const wchar_t* wh
   t.join(); ws->progress = nullptr; prog->release(); g_busyText.clear(); g_busyPct = -1; return ec;
 }
 static bool removeDir(const std::wstring& dir) { std::wstring dz = dir; dz.push_back(L'\0'); SHFILEOPSTRUCTW op = {}; op.wFunc = FO_DELETE; op.pFrom = dz.c_str(); op.fFlags = FOF_NO_UI; return SHFileOperationW(&op) == 0; }
+static bool dirExists(const std::wstring& d) { DWORD a = GetFileAttributesW(d.c_str()); return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY); }
+static std::vector<logic::FolderEntry> listFolder(const std::wstring& dir) {
+  std::vector<logic::FolderEntry> v; WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd); if (h == INVALID_HANDLE_VALUE) return v;
+  do { std::wstring n = fd.cFileName; if (n == L"." || n == L"..") continue; v.push_back({n, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0}); } while (FindNextFileW(h, &fd)); FindClose(h); return v; }
+// Review A1/A2/A3/F6. Save:
+//  - only when no scan is being tidied (the caller queues otherwise), from a snapshot model the UI cannot change;
+//  - into a new folder, or by swapping out a folder that is this project's own (logic::canReplaceFolder): never a folder
+//    with other files, never a Studio project with entries ArtecRec did not load;
+//  - the previous copy is kept as "<name>__previous" (one generation), never deleted outright;
+//  - g_saveErr says in plain words what went wrong and where the data is.
 static bool saveProject(const std::wstring& sproj) {
-  waitPostProcess(1e9); std::wstring dir = projDir(sproj), name = sproj.substr(dir.size() + 1);
-  // The SDK saver cannot write into an existing project folder (second save of wall_sdk_9, 2 Nov: 0x80010104).
-  // Studio simply overwrites. So: save into a temporary sibling folder, then swap it in; the old copy is removed
-  // only after the new one is complete.
-  bool exists = GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES; std::wstring outDir = exists ? dir + L"__saving" : dir, outProj = outDir + L"\\" + name;
-  if (exists) removeDir(outDir); SHCreateDirectoryExW(nullptr, outDir.c_str(), nullptr);
-  prj::ProjectSettings ps; ps.path = outProj.c_str(); prj::IProject* p = nullptr; ErrorCode ec = prj::createNewProject(&p, &ps); if (ec != ErrorCode_OK || !p) { logf("createNewProject 0x%08X", (unsigned)ec); return false; }
+  g_saveErr.clear(); if (!postIdle()) { g_saveErr = L"Scans are still being processed. Try again in a moment."; return false; }
+  std::wstring dir = projDir(sproj), name = sproj.substr(dir.size() + 1), stem = logic::stemOf(name);
+  bool exists = dirExists(dir); std::vector<logic::FolderEntry> entries = exists ? listFolder(dir) : std::vector<logic::FolderEntry>();
+  bool ours = GetFileAttributesW((dir + L"\\artecrec-project.txt").c_str()) != INVALID_FILE_ATTRIBUTES || (logic::iEquals(sproj, g_projPath) && GetFileAttributesW((dir + L"\\artecrec-groups.txt").c_str()) != INVALID_FILE_ATTRIBUTES);
+  logic::SwapVerdict v = logic::canReplaceFolder(exists, entries, stem, ours, g_projForeign && logic::iEquals(sproj, g_projPath));
+  if (v == logic::Swap_Foreign || v == logic::Swap_NotOurs) { g_saveErr = L"The folder\n" + dir + L"\nalready holds other files (or a project ArtecRec did not make). ArtecRec will not replace it.\n\nUse Save project as... with a new name."; logf("save refused: %ls is not this project's own folder", dir.c_str()); return false; }
+  bool swap = exists; /* the SDK saver cannot write into an existing folder, even an empty one */ std::wstring outDir = swap ? dir + L"__saving" : dir, outProj = outDir + L"\\" + name;
+  if (swap && dirExists(outDir)) removeDir(outDir);   // our own leftover from an interrupted save
+  if (!dirExists(outDir) && SHCreateDirectoryExW(nullptr, outDir.c_str(), nullptr) != ERROR_SUCCESS && !dirExists(outDir)) { g_saveErr = L"Could not create the folder\n" + outDir + L"\n(is the drive full or read-only?)"; return false; }
+  prj::ProjectSettings ps; ps.path = outProj.c_str(); prj::IProject* p = nullptr; ErrorCode ec = prj::createNewProject(&p, &ps); if (ec != ErrorCode_OK || !p) { logf("createNewProject 0x%08X", (unsigned)ec); g_saveErr = L"The scanner software could not create the project file."; if (swap) removeDir(outDir); return false; }
   prj::ProjectSaverSettings ss; ss.path = outProj.c_str(); generateUuid(&ss.projectId); ss.compressionLevel = 0; IJob* saver = nullptr; ec = p->createSaver(&saver, &ss);
-  if (ec != ErrorCode_OK || !saver) { logf("createSaver 0x%08X", (unsigned)ec); p->release(); return false; }
-  rebuildMaster(); AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = g_master; ws.threadsCount = std::thread::hardware_concurrency();
-  auto t0 = clk::now(); ec = runJobPumped(saver, &ws, L"Saving project…"); saver->release(); p->release();
-  char path[1024]; wcstombs(path, sproj.c_str(), 1023); logf("save 0x%08X %.1f s -> %s%s", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), path, exists ? " (replacing the existing project)" : "");
-  if (ec != ErrorCode_OK) { if (exists) removeDir(outDir); return false; }
-  if (exists) { std::wstring old = dir + L"__old"; removeDir(old);
-    if (!MoveFileExW(dir.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING) || !MoveFileExW(outDir.c_str(), dir.c_str(), 0)) { logf("could not replace the project folder (error %lu); the new copy is in %ls", GetLastError(), outDir.c_str()); return false; }
-    removeDir(old); }
-  saveGroups(sproj); writeStudioNames(sproj); g_dirty = false; g_projPath = sproj; return true;
+  if (ec != ErrorCode_OK || !saver) { logf("createSaver 0x%08X", (unsigned)ec); p->release(); g_saveErr = L"The scanner software could not start saving."; if (swap) removeDir(outDir); return false; }
+  IModel* snap = nullptr; createModel(&snap); { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.scan) snap->add(r.scan); }   // snapshot: the saver never sees g_master change (review A3)
+  AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = snap; ws.threadsCount = std::thread::hardware_concurrency();
+  auto t0 = clk::now(); ec = runJobPumped(saver, &ws, L"Saving project..."); saver->release(); p->release(); snap->release();
+  logf("save 0x%08X %.1f s -> %s%s", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), logic::utf8(sproj).c_str(), swap ? " (replacing the existing copy; the old one is kept as __previous)" : "");
+  if (ec != ErrorCode_OK) { if (swap) removeDir(outDir); g_saveErr = L"The scanner software reported an error while saving (code " + std::to_wstring((unsigned)ec) + L"). Nothing was changed on disk."; return false; }
+  if (swap) { std::wstring prev = dir + L"__previous"; if (dirExists(prev)) removeDir(prev);
+    if (!MoveFileExW(dir.c_str(), prev.c_str(), 0)) { DWORD e = GetLastError(); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nbut the old folder could not be moved aside (error " + std::to_wstring(e) + L"; is a window open on it?). Close Explorer windows on it and save again."; logf("could not move the old project folder aside (error %lu)", e); return false; }
+    if (!MoveFileExW(outDir.c_str(), dir.c_str(), 0)) { DWORD e = GetLastError(); MoveFileExW(prev.c_str(), dir.c_str(), 0); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nand the old project is unchanged (error " + std::to_wstring(e) + L")."; logf("could not move the new project folder in (error %lu)", e); return false; } }
+  writeFileAtomic(dir + L"\\artecrec-project.txt", "Saved by ArtecRec. This folder holds one project; ArtecRec may replace it when the project is saved again.\r\n");
+  saveGroups(sproj); writeStudioNames(sproj); g_dirty = false; g_projPath = sproj; g_projForeign = false; return true;
 }
-static void clearProject() { waitPostProcess(1e9); std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); }
+static void clearProject() { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); g_projForeign = false; }
+// Review F5/A2/D4: the current project is cleared only after the new one loaded with at least one scan; a Studio project
+// with entries ArtecRec does not load is marked (never overwritten); loaded scans are anchors for later auto-aligns.
 static bool openProject(const std::wstring& sproj) {
-  prj::IProject* p = nullptr; ErrorCode ec = prj::openProject(&p, sproj.c_str()); if (ec != ErrorCode_OK || !p) { logf("openProject 0x%08X", (unsigned)ec); return false; }
-  int n = p->getEntryCount(); std::vector<Uuid> ids; std::vector<std::wstring> names;
-  for (int i = 0; i < n; i++) { prj::EntryInfo e; IString* nm = nullptr; if (p->getEntry(i, &e, &nm) == ErrorCode_OK && e.type == prj::EntryType_Scan) { ids.push_back(e.uuid); names.push_back(nm ? nm->getPointer() : L"Scan"); } if (nm) nm->release(); }
+  g_saveErr.clear(); prj::IProject* p = nullptr; ErrorCode ec = prj::openProject(&p, sproj.c_str()); if (ec != ErrorCode_OK || !p) { logf("openProject 0x%08X", (unsigned)ec); g_saveErr = L"The file could not be read as an Artec project."; return false; }
+  int n = p->getEntryCount(); std::vector<Uuid> ids; std::vector<std::wstring> names; int other = 0;
+  for (int i = 0; i < n; i++) { prj::EntryInfo e; IString* nm = nullptr; if (p->getEntry(i, &e, &nm) == ErrorCode_OK) { if (e.type == prj::EntryType_Scan) { ids.push_back(e.uuid); names.push_back(nm ? nm->getPointer() : L"Scan"); } else other++; } if (nm) nm->release(); }
+  if (ids.empty()) { p->release(); g_saveErr = L"This project has no scans that ArtecRec can open (it may hold only models). Your current project is unchanged."; logf("open: no scans in %s", logic::utf8(sproj).c_str()); return false; }
   IArrayUuid* use = nullptr; createArrayUuid(&use, (int)ids.size()); for (int i = 0; i < (int)ids.size(); i++) use->setElement(i, ids[i]);
   prj::ProjectLoaderSettings ls; ls.entryList = use; IJob* loader = nullptr; ec = p->createLoader(&loader, &ls);
   IModel* out = nullptr; createModel(&out);
-  if (ec == ErrorCode_OK && loader) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); auto t0 = clk::now(); ec = runJobPumped(loader, &ws, L"Opening project…"); loader->release();
-    logf("open 0x%08X %.1f s, scans %d", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), out->getSize()); }
+  if (ec == ErrorCode_OK && loader) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); auto t0 = clk::now(); ec = runJobPumped(loader, &ws, L"Opening project..."); loader->release();
+    logf("open 0x%08X %.1f s, scans %d (other entries not loaded: %d)", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), out->getSize(), other); }
   use->release(); p->release();
-  if (ec != ErrorCode_OK) { out->release(); return false; }
+  if (ec != ErrorCode_OK || out->getSize() == 0) { out->release(); g_saveErr = L"The scans could not be loaded. Your current project is unchanged."; return false; }
   clearProject();
-  { std::lock_guard<std::mutex> l(g_scanMx); for (int i = 0; i < out->getSize(); i++) { IScan* s = out->getElement(i); if (!s) continue; ScanRec r; r.scan = s; s->addRef(); r.name = s->getName() ? s->getName() : (i < (int)names.size() ? names[i] : L"Scan"); countScanStats(r); g_scans.push_back(std::move(r)); } }
-  for (auto& r : g_scans) startPostProcess(r.scan, false);   // display meshes + search reference in the background (no re-registration of saved scans)
-  out->release(); rebuildMaster(); loadGroups(sproj); g_projPath = sproj; g_dirty = false; return true;
+  { std::lock_guard<std::mutex> l(g_scanMx); for (int i = 0; i < out->getSize(); i++) { IScan* s = out->getElement(i); if (!s) continue; ScanRec r; r.scan = s; s->addRef(); r.placed = true; r.name = s->getName() ? s->getName() : (i < (int)names.size() ? names[i] : L"Scan"); countScanStats(r); g_scans.push_back(std::move(r)); } }
+  for (auto& r : g_scans) startPostProcess(r.scan, false);   // display meshes + search reference in the background (no re-registration of saved scans); at most 3 at once
+  out->release(); rebuildMaster(); loadGroups(sproj); g_projPath = sproj; g_dirty = false; g_projForeign = other > 0; return true;
 }
 
 static double fpsNow() { std::lock_guard<std::mutex> l(g_stmx); if (g_stamps.size() < 2) return 0; double s = std::chrono::duration<double>(g_stamps.back() - g_stamps.front()).count(); return s > 0.2 ? (g_stamps.size() - 1) / s : 0; }
