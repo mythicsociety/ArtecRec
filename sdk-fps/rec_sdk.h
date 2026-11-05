@@ -420,6 +420,10 @@ static bool featureSearch(double T[4][4], int& inliers, int& matches, int& refSc
 // most recent scan first; each search try tests the next two windows in rotation, so the whole project is covered in
 // a few seconds and the tail (the usual resume spot) is always tried first.
 struct HybridWindow { int scan; std::vector<int> frames; };
+// 5 Nov 10:55 crash (0xC0000409 in ucrtbase): after a tracking loss the position search read the frames of the scan
+// just closed while cleanScan was rewriting them (points/triangles replaced in place). The scan being cleaned is
+// published here; the search waits (returns, retries in 2 s) while it is set. Cleaning takes 0.2–1.2 s.
+static std::atomic<IScan*> g_cleaningScan{nullptr};
 static std::vector<HybridWindow> hybridWindows() {
   std::vector<HybridWindow> w; std::lock_guard<std::mutex> l(g_scanMx);
   for (int i = (int)g_scans.size() - 1; i >= 0; i--) { auto& s = g_scans[i]; if (!(s.visible && s.scan && s.scan->getSize() > 0 && (s.group < 0 || g_groups[s.group].visible))) continue;
@@ -476,6 +480,7 @@ static bool g_localResume = true;
 static void runPositionSearch() {
   if (g_searchBusy.exchange(true)) return; if (g_searchThread.joinable()) g_searchThread.join();
   g_searchThread = std::thread([] {
+    if (g_cleaningScan.load()) { g_lastSearch = clk::now(); g_searchBusy = false; return; }   // a scan is being cleaned: try again in 2 s
     if (g_localResume) { std::vector<HybridWindow> wins = hybridWindows(); bool texReady = false; Matrix4x4D Fin; { std::lock_guard<std::mutex> l(g_tempMx); texReady = g_tempTex && g_tempTex->getSize() >= 3; if (texReady) Fin = g_tempTex->getTransformation(g_tempTex->getSize() - 1); }
       if (texReady && !wins.empty()) { int latest = wins[0].scan; int tried = 0;
         for (size_t a = 0; a < wins.size() && tried < 3; a++) { const HybridWindow& win = wins[a]; if (win.scan != latest) break; tried++;
@@ -720,7 +725,10 @@ static bool refine(IScan* s, Matrix4x4D& out, double& moved, double& rms) {
 } // namespace pa
 static void postProcessScan(IScan* s, bool optimise) {   // s carries one reference for this thread
   g_postBusy++; g_optimising = optimise; auto t0 = clk::now(); int nf = s->getSize(); IScan* r = nullptr;
-  if (optimise && nf >= 1) { cleanScan(s); nf = s->getSize();
+  if (optimise && nf >= 1) {
+    // publish first, then let a search already in flight finish (it may be reading this scan), then clean
+    g_cleaningScan = s; for (int w = 0; w < 200 && g_searchBusy.load(); w++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    cleanScan(s); g_cleaningScan = nullptr; nf = s->getSize();
     // image memory for the position search right away (~1 s), so a resume just after a tracking loss can find this
     // scan while its registration (5–15 s) still runs; the registered result replaces it when WM_POSTDONE lands
     if (g_featSearch && nf >= 3) { std::vector<FrameFeat> early = buildFeats(s, 40); std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) if (rec.scan == s) { rec.feats = std::move(early); break; } } }
