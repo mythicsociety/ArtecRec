@@ -212,7 +212,10 @@ static void render(int w, int h, bool forShot) {
     // Studio look while scanning (owner, 5 Nov): the whole area covered in this pass is a dense, flat distance-colour
     // surface (green at a good distance). Accumulated frames keep their colours when "Show distance color" is on and
     // are drawn unlit; the current frame on top, also flat.
-    bool liveGreen = S.distColor && !g_liveAcc.empty() && !g_liveAcc.back().col.empty();
+    // only while scanning: after Stop the accumulated frames stay until the next start, and green there left a stale
+    // patch over the finished scan (owner, 5 Nov 10:36) — idle draws them the normal way
+    bool scanningNow = mode == M_Record || mode == M_Paused || mode == M_Preview;
+    bool liveGreen = scanningNow && S.distColor && !g_liveAcc.empty() && !g_liveAcc.back().col.empty();
     if (liveGreen) { bool lit = lighting; lighting = false;
       for (auto& m : g_liveAcc) { glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; drawMesh(m, grey, false, false); }
       float cur2[3] = {0.30f, 0.80f, 0.32f}; if (lost) { cur2[0] = 0.9f; cur2[1] = 0.2f; cur2[2] = 0.15f; } glPolygonOffset(-0.6f * drawn - 2, -0.6f * drawn - 2);
@@ -221,7 +224,7 @@ static void render(int w, int h, bool forShot) {
     else {
     bool liveFill = colorMode == 0 && g_liveTexSet;
     if (liveFill) for (auto& m : g_liveAcc) { if (!m.uv.empty()) continue; glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; drawMesh(m, g_liveTexAvg, false, false, true); }
-    for (auto& m : g_liveAcc) { if (liveFill && m.uv.empty()) continue; glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; drawMesh(m, grey, false, colorMode == 0); }   // captured surfaces: textured where available, later ones on top
+    for (auto& m : g_liveAcc) { if (liveFill && m.uv.empty()) continue; glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; std::vector<float> keep; keep.swap(m.col); drawMesh(m, grey, false, colorMode == 0); keep.swap(m.col); }   // captured surfaces: textured where available, later ones on top (distance colours, kept for the live green, hidden here)
     float cur[3] = {0.30f, 0.80f, 0.32f}; if (lost) { cur[0] = 0.9f; cur[1] = 0.2f; cur[2] = 0.15f; }
     glPolygonOffset(-0.6f * drawn - 2, -0.6f * drawn - 2);
     if (!g_live.v.empty()) { FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur, false, false); keep.swap(m.col); } else drawMesh(m, cur, false, false); }

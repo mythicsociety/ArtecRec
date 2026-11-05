@@ -74,7 +74,7 @@ static void updateStatus() {
   if (m == M_Record && g_alignLive.load() && !g_liveFound.load()) ms = L"Searching for position…"; if (m == M_Record && g_lostNow.load()) ms = S.scanUsingAutoAlign ? L"Searching for position…" : L"Tracking lost";
   swprintf(b, 512, L"%.1f fps\r\n\r\nSurfaces recorded: %ld\r\nRecording time: %d:%02d\r\nRegistration failures: %ld   %s\r\n\r\n%s", (m == M_Idle) ? 0.0 : fps, shown, (int)secs / 60, (int)secs % 60, g_regFail.load(), g_alignMsg.c_str(), ms);
   panel::setStatus(b); panel::enableForMode(m);
-  wchar_t sb[256]; swprintf(sb, 256, L"  Free RAM: %.0f MB   |   Total memory in use: %.0f MB   |   %s%s", freeGB() * 1024, wsGB() * 1024, m == M_Idle ? L"Ready" : ms, g_dirty ? L"   |   project modified" : L""); SetWindowTextW(g_statusBar, sb);
+  wchar_t sb[320]; swprintf(sb, 320, L"  Build %hs %hs   |   Free RAM: %.0f MB   |   Total memory in use: %.0f MB   |   %s%s", __DATE__, __TIME__, freeGB() * 1024, wsGB() * 1024, m == M_Idle ? L"Ready" : ms, g_dirty ? L"   |   project modified" : L""); SetWindowTextW(g_statusBar, sb);
   if (g_showLog) { std::wstring t; { std::lock_guard<std::mutex> l(g_logMx); size_t n = g_logLines.size(); for (size_t i = n > 5 ? n - 5 : 0; i < n; i++) { t += g_logLines[i]; t += L"\r\n"; } } static std::wstring lastT; if (t != lastT) { SetWindowTextW(g_logBox, t.c_str()); lastT = t; } }
 }
 static void layout() {
