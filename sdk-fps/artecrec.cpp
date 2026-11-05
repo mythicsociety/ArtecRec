@@ -250,8 +250,11 @@ static void jobDone(int gen) {
   restorePanels(); g_freshRestarts = 0;
   // Post-Stop auto-align only when the newest scan was NOT placed by the live search (3 Nov 16:37). It is queued and runs
   // from the timer once the new scan's tidy-up has finished (review B2: it used to block the window meanwhile).
+  // Trail21 (5 Nov 17:39): a pass ended by tracking loss, the automatic restart then recorded 4 frames (discarded) and
+  // the user stopped: "added" was 0, so the unplaced pass from the restart chain was never auto-aligned. Look at the
+  // newest scan, not at what this last recording added.
   bool newestPlaced = !g_scans.empty() && g_scans.back().placed;
-  if (added && S.autoAlign && !newestPlaced) { int vis = 0; for (auto& sc : g_scans) if (sc.visible) vis++; if (vis >= 2) g_pendingAlign = true; }
+  if (S.autoAlign && !g_scans.empty() && !newestPlaced) { int vis = 0; for (auto& sc : g_scans) if (sc.visible) vis++; if (vis >= 2) { g_pendingAlign = true; logf("auto-align queued: the newest scan was not placed while scanning"); } }
 }
 static LRESULT CALLBACK wndProc(HWND h, UINT u, WPARAM wp, LPARAM lp) {
   switch (u) {
