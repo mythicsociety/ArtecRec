@@ -28,6 +28,8 @@
 #include <artec/sdk/base/IArray.h>
 #include <artec/sdk/base/IString.h>
 #include <artec/sdk/base/AlgorithmWorkset.h>
+#include <artec/sdk/base/ICancellationTokenSource.h>
+#include <artec/sdk/base/ICancellationToken.h>
 #include <artec/sdk/base/IJob.h>
 #include <artec/sdk/base/IProgressInfo.h>
 #include <artec/sdk/base/RefBase.h>
@@ -154,6 +156,7 @@ enum Mode { M_Idle, M_Preview, M_Record, M_Paused, M_Stopping, M_Aligning, M_Bus
 static std::atomic<int> g_mode{M_Idle};
 static IScanner* g_scanner; static ScannerId g_scannerId; static IScanningProcedure* g_proc; static IModel* g_master; static IModel* g_jobOut;
 static std::vector<ScanRec> g_scans; static std::vector<GroupRec> g_groups; static std::mutex g_scanMx;
+static ICancellationTokenSource* g_cts = nullptr; static std::mutex g_ctsMx; static std::atomic<bool> g_stopAsked{false}, g_cancelSent{false}; static clk::time_point g_stopAt;
 static std::thread g_job; static std::atomic<bool> g_jobDone{false}; static std::atomic<ErrorCode> g_jobEc{ErrorCode_OK};
 static std::atomic<long> g_frames{0}, g_regFail{0}, g_lost{0}, g_keyFrames{0}, g_texFrames{0}; static std::atomic<double> g_maxErr{0};
 static std::atomic<long> g_cbFrames{0}; static clk::time_point g_procStart;   // frames delivered by the SDK since the procedure started (any mode) — a stalled capture shows as 0
@@ -354,15 +357,24 @@ static bool startProcedure(ScanningState initial) {
   createModel(&g_jobOut); g_jobDone = false; g_cbFrames = 0; g_procStart = clk::now(); g_frames = 0; g_regFail = 0; g_lost = 0; g_keyFrames = 0; g_texFrames = 0; g_maxErr = 0; g_lostNow = false;
   prepareRecording(initial == ScanningState_Record);
   { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); g_live = FrameMesh(); }
-  g_job = std::thread([] {
+  ICancellationTokenSource* cts = nullptr; createCancellationTokenSource(&cts); { std::lock_guard<std::mutex> l(g_ctsMx); g_cts = cts; } g_stopAsked = false; g_cancelSent = false;
+  g_job = std::thread([cts] {
     IModel* in = nullptr; createModel(&in); AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = g_jobOut; ws.threadsCount = std::thread::hardware_concurrency();
+    if (cts) ws.cancellation = cts->getToken();
     g_jobEc = executeJob(g_proc, &ws); in->release();
+    { std::lock_guard<std::mutex> l(g_ctsMx); if (g_cts == cts) g_cts = nullptr; } if (cts) cts->release();
     g_jobDone = true; PostMessageW(g_hwnd, WM_JOBDONE, 0, 0);
   });
   logf("procedure started (%s, texture=%d, tracking=%s, range %.0f..%.0f, sens %.2f, speed %d, texFreq %s)", initial == ScanningState_Record ? "record" : "preview", (int)tex, hybrid ? "geometry+texture" : "geometry",
        S.nearMm.load(), S.farMm.load(), S.sens, S.speed, S.texFreq == 0 ? "auto" : "every N"); return true;
 }
-static void stopProcedure() { if (g_proc && !g_jobDone) { g_mode = M_Stopping; g_proc->setState(ScanningState_Stop); } }
+static void stopProcedure() { if (g_proc && !g_jobDone) { g_mode = M_Stopping; if (!g_stopAsked) { g_stopAsked = true; g_stopAt = clk::now(); } g_proc->setState(ScanningState_Stop); } }
+// 5 Nov 12:01: the scanner dropped off USB mid-recording; the SDK procedure never returned from Stop (waitForTriggerReady
+// errors, ~1,500 in 6 min) and ArtecRec sat in "Stopping" until killed in Task Manager — three unsaved scans lost.
+// If Stop has not finished in 8 s, cancel the procedure through its cancellation token.
+static void cancelStuckProcedure() {
+  if (g_jobDone || !g_stopAsked || g_cancelSent || std::chrono::duration<double>(clk::now() - g_stopAt).count() < 8.0) return;
+  g_cancelSent = true; std::lock_guard<std::mutex> l(g_ctsMx); if (g_cts) { g_cts->cancel(); logf("Stop did not finish in 8 s (scanner not answering): procedure cancelled"); } }
 static IScan* buildRef(IScan* s, int cap);
 static bool g_featSearch = false;   // image-feature position search (the "FS" build: exe name contains "artecrec-fs")
 // Image-feature position search: match the latest textured probe frame against the feature banks of all visible

@@ -181,6 +181,7 @@ static void onTimer() {
   // Studio beeps continuously while tracking is lost and while it searches for the position; stops once tracking resumes.
   if (S.audio && m == M_Record && (g_lostNow.load() || (g_alignLive.load() && !g_liveFound.load())) && std::chrono::duration<double>(clk::now() - g_lastBeep).count() > 0.7) { g_lastBeep = clk::now(); MessageBeep(MB_ICONEXCLAMATION); }
   static clk::time_point lastLog = clk::now(); if (m == M_Record && std::chrono::duration<double>(clk::now() - lastLog).count() >= 60) { lastLog = clk::now(); logf("rec fps %.2f frames %ld regFail %ld lost %ld memGB %.1f", fpsNow(), g_frames.load(), g_regFail.load(), g_lost.load(), wsGB()); }
+  cancelStuckProcedure();   // Stop stuck after a USB drop (5 Nov 12:01)
   updateStatus(); view::draw();
 }
 static void jobDone() {
