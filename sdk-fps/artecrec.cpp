@@ -236,7 +236,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   bool scannerOk = connectScanner(); if (!scannerOk) logf("no scanner at start: will keep trying");
   WNDCLASSW wc = {}; wc.lpfnWndProc = wndProc; wc.hInstance = hi; wc.lpszClassName = L"ArtecRecMain"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); RegisterClassW(&wc);
   WNDCLASSW gc = {}; gc.lpfnWndProc = view::proc; gc.hInstance = hi; gc.lpszClassName = L"ArtecRecGL"; gc.style = CS_OWNDC | CS_DBLCLKS; gc.hCursor = LoadCursor(nullptr, IDC_ARROW); RegisterClassW(&gc);
-  g_hwnd = CreateWindowW(L"ArtecRecMain", APP, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 900, nullptr, nullptr, hi, nullptr);
+  // build date in the title bar (owner, 5 Nov: "how do I know this is the latest version")
+  static wchar_t title[128]; swprintf(title, 128, L"%s  -  build %hs %hs", APP, __DATE__, __TIME__); logf("build %s %s", __DATE__, __TIME__);
+  g_hwnd = CreateWindowW(L"ArtecRecMain", title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 900, nullptr, nullptr, hi, nullptr);
   g_font = CreateFontW(17, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); g_fontB = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); g_fontSmall = CreateFontW(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
   wchar_t dev[160]; if (scannerOk) swprintf(dev, 160, L"Artec Scanner [%s]", g_scannerId.serial); else wcscpy(dev, L"(no scanner connected)");
   panel::create(g_hwnd, g_font, g_fontB, g_fontSmall, dev); ws::create(g_hwnd, g_font, g_fontB); ws::onChanged = [] { };

@@ -365,6 +365,38 @@ PNBC relayed the owner's findings (inbox 2026-11-03-pnbc-artecrec-position-searc
   close it yourself", Gowtham): closed via WM_CLOSE from an interactive scheduled task (CloseMainWindow from the ssh
   session cannot reach the desktop's windows), then both builds (579,584 bytes) copied into D:\ArtecRec, NOT launched.
   Tomorrow's first launch (desktop shortcut = artecrec.exe) runs the auto-align fix. Trail15 (3 scans) was saved.
+
+## 5 Nov — root of the Studio slide: BIOS/firmware from the 1–2 Mar 2025 update (owner's timeline)
+- Owner: slide appeared the day after the 1–2 Mar 2025 update (field trip cancelled); rolling Windows back to 23H2
+  on 19 Apr 2025 did NOT help → Windows ruled out; firmware is not undone by a Windows rollback.
+- Windows history (HKLM\SYSTEM\Setup\Source OS): Win10 21H1 (Feb 2021, the 5.8-fps photos) → Win11 21H2 (Sep 2022) →
+  23H2 (Apr 2023) → 24H2 (1–2 Mar 2025) → back to 23H2 (19 Apr 2025) → 25H2 (13–20 Sep 2025).
+- HP R92 BIOS chain (ftp.hp.com softpaqs): 01.26.00 sp149926 5 Dec 2023 ME 12.0.93 EC 65.37 | 01.27.00 sp151409
+  11 Mar 2024 ME 12.0.94 (MCU update) | 01.28.00 sp152549 13 May 2024 ME 12.0.94 | 01.29.01 sp154775 20 Sep 2024
+  ME 12.0.94 EC 65.38 | 01.30.00 sp156297 18 Dec 2024 ME 12.0.95 | 01.31.00 sp156954 11 Feb 2025 ME 12.0.96.2562.
+  Thunderbolt 61.0.1.2.1 and PD CCG5 1.6.0 unchanged across all. Laptop now: BIOS 01.35.02 (5 May 2026), ME still
+  12.0.96.2562 → suspect = 01.30/01.31 (ME 12.0.95/96) delivered with the 24H2 update.
+- Laptop BIOS settings (read via root/HP/InstrumentedBIOS, read-only): Rollback Policy = Unrestricted, Lock BIOS
+  Version = Disable, Minimum BIOS Version 00.00.00, Sure Start BIOS settings protection off, no setup/power-on
+  password, Native OS Firmware Update Service = Enable (Windows Update can re-flash — turn off after a downgrade).
+- BitLocker ON for C: (TPM + recovery password) and D: (auto-unlock + recovery password); user shasa is a Microsoft
+  account → keys likely at account.microsoft.com/devices/recoverykey. Owner did not know them; told to read them at
+  the laptop (manage-bde -protectors -get C: / D:) and write them down — I do not read/print keys.
+- Plan, owner at the lab ~09:00 IST 5 Nov: keys secured → I stage sp154775 (01.29.01) in D:\ArtecDiag and check MD5
+  → suspend BitLocker for one reboot → owner runs the installer on mains power → I read BIOS/ME versions → 30-min
+  Studio recording + 10-min ArtecRec check → keep (and disable OS firmware updates) or re-flash 01.35.02 same day.
+- DONE 5 Nov 09:20–10:30: sp154775 MD5 B1E9B7CBEB87F129A34F81314AE82AD7 = page; Native OS Firmware Update Service set
+  Disable via HP_BIOSSettingInterface (return 0); Windows Update paused 1 week by owner; BitLocker C: suspended
+  (RebootCount 2); owner ran the installer. First boot: black screen, power-off, lights off; brief power press →
+  "Protected by HP Sure Start" → Windows. Result: BIOS R92 01.29.01 (2024-08-23), ME stayed 12.0.96.2562 (ME refuses
+  downgrade — SVN). BitLocker resumed on C: after the test (both drives On).
+- Studio 17 on BIOS 01.29.01: preview 5.6 → 5.3 → 5.1 → 5.0 → 4.7 in ~20 min (CPU 71 °C max, clock 114 %, not
+  throttled), second preview again 4.7; record after a restart 5.8 → 5.6 → 5.4 (3–4 min) → 4.8. SAME SLIDE →
+  BIOS/microcode NOT the cause. ME unlikely (ArtecRec/SDK runs flat at 5.7 on the same ME). The slide is in
+  Studio's own path on this laptop (also in preview, so not only the growing model). Next suspects (after the
+  trip): NVIDIA driver 597.16 (13 Oct 2026) — older driver versions not yet tested; Studio's GPU/compute load.
+  Owner chose to KEEP 01.29.01 for now; decide before Windows Update resumes (~12 Nov) — 01.35.02 package is still in
+  the DriverStore (r92_013502.inf) and can be re-applied by re-enabling the firmware service + reinstalling it.
 - Second, separate defect: pass 1's first ~28 frames sit 2.5 mm off (a block in the zspread map) — a tracking error at
   the start of the pass; SDK fine+global on the cleaned frames made it WORSE (54 %), chainfix too (8 mm moves). Open.
 - Also: Artec lists HP ZBook 17 G6 under its USB 3.1 issue (owner's post) — matches the scanner drops; saving over a

@@ -209,17 +209,31 @@ static void render(int w, int h, bool forShot) {
         drawMesh(m, c, scansAsPoints); }
       glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); } }
   { std::lock_guard<std::mutex> l(g_mx); float grey[3] = {0.66f, 0.66f, 0.64f}; glEnable(GL_POLYGON_OFFSET_FILL); int drawn = 0;
+    // Studio look while scanning (owner, 5 Nov): the whole area covered in this pass is a dense, flat distance-colour
+    // surface (green at a good distance). Accumulated frames keep their colours when "Show distance color" is on and
+    // are drawn unlit; the current frame on top, also flat.
+    bool liveGreen = S.distColor && !g_liveAcc.empty() && !g_liveAcc.back().col.empty();
+    if (liveGreen) { bool lit = lighting; lighting = false;
+      for (auto& m : g_liveAcc) { glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; drawMesh(m, grey, false, false); }
+      float cur2[3] = {0.30f, 0.80f, 0.32f}; if (lost) { cur2[0] = 0.9f; cur2[1] = 0.2f; cur2[2] = 0.15f; } glPolygonOffset(-0.6f * drawn - 2, -0.6f * drawn - 2);
+      if (!g_live.v.empty()) { FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur2, false, false); keep.swap(m.col); } else drawMesh(m, cur2, false, false); }
+      lighting = lit; glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); }
+    else {
     bool liveFill = colorMode == 0 && g_liveTexSet;
     if (liveFill) for (auto& m : g_liveAcc) { if (!m.uv.empty()) continue; glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; drawMesh(m, g_liveTexAvg, false, false, true); }
     for (auto& m : g_liveAcc) { if (liveFill && m.uv.empty()) continue; glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; drawMesh(m, grey, false, colorMode == 0); }   // captured surfaces: textured where available, later ones on top
     float cur[3] = {0.30f, 0.80f, 0.32f}; if (lost) { cur[0] = 0.9f; cur[1] = 0.2f; cur[2] = 0.15f; }
     glPolygonOffset(-0.6f * drawn - 2, -0.6f * drawn - 2);
     if (!g_live.v.empty()) { FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur, false, false); keep.swap(m.col); } else drawMesh(m, cur, false, false); }
-    glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); }
+    glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); } }
   drawRotCentre(); deleteTrashTextures();
   if (forShot) return;
   overlayBegin(w, h);
   if (rangeMeter && mode != M_Idle) drawRangeMeter(w, h); drawGizmo(w, h); drawButtons(w, h);
+  // 4 Nov 16:54: after a second loss every frame failed for a minute (314 of 315) — the scanner saw nothing it could
+  // track. After 6 s of that, say what to do, in plain words.
+  { static clk::time_point lostSince; static bool wasLost = false; if (lost && !wasLost) lostSince = clk::now(); wasLost = lost;
+    if (lost && std::chrono::duration<double>(clk::now() - lostSince).count() > 6.0) { glColor4f(0.85f, 0.45f, 0.05f, 0.85f); rect(0, h / 2.f + 34, (float)w, 34); glColor3f(1, 1, 1); text(w / 2.f - 260, h / 2.f + 56, L"No usable surface: hold the scanner about 25 cm from carved stone, over an area already scanned"); } }
   if (lost) { if (S.scanUsingAutoAlign) { glColor4f(0.1f, 0.55f, 0.2f, 0.8f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
     else { glColor4f(0.8f, 0.1f, 0.1f, 0.8f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 210, h / 2.f + 6, L"Tracking lost: Repeat scan using slower motions or additional features"); } }
   else if (mode == M_Record && g_alignLive.load() && !g_liveFound.load()) { glColor4f(0.1f, 0.55f, 0.2f, 0.8f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }

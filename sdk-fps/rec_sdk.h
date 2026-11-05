@@ -295,7 +295,9 @@ struct Obs : public ScanningProcedureObserverBase {
     g_hist = std::move(h);
     // Studio accumulates every registered frame in the live view, which is how re-scanning from another angle fills
     // holes on screen. Key frames only (earlier) left the holes visible until Stop.
-    if (rec && !lost && i->frameState == FrameState_Ok && (i->geometryKeyFrame || (g_frames.load() % 2 == 0))) { FrameMesh k = m; k.col.clear(); if (f->isTextured()) { grabTexture(f, k); if (!k.uv.empty()) { for (int a = 0; a < 3; a++) g_liveTexAvg[a] = g_liveTexSet ? g_liveTexAvg[a] * 0.8f + k.texAvg[a] * 0.2f : k.texAvg[a]; g_liveTexSet = true; } }   // Studio shows captured surfaces textured while scanning
+    // 5 Nov, owner: Studio shows the area covered in this pass as a dense green; keep the distance colours on the
+    // accumulated frames when "Show distance color" is on (they are drawn flat, unlit — rec_view.h).
+    if (rec && !lost && i->frameState == FrameState_Ok && (i->geometryKeyFrame || (g_frames.load() % 2 == 0))) { FrameMesh k = m; if (!S.distColor) k.col.clear(); if (f->isTextured()) { grabTexture(f, k); if (!k.uv.empty()) { for (int a = 0; a < 3; a++) g_liveTexAvg[a] = g_liveTexSet ? g_liveTexAvg[a] * 0.8f + k.texAvg[a] * 0.2f : k.texAvg[a]; g_liveTexSet = true; } }   // Studio shows captured surfaces textured while scanning
       if (g_liveAcc.size() >= LIVE_ACC_MAX) { std::vector<FrameMesh> half; for (size_t j = 0; j < g_liveAcc.size(); j += 2) half.push_back(std::move(g_liveAcc[j])); g_liveAcc = std::move(half); } g_liveAcc.push_back(std::move(k)); }
     g_live = std::move(m); g_live.noVbo = true; g_newData = true;
   }
@@ -767,7 +769,9 @@ static int onJobDone() {
     for (int i = 0; i < g_jobOut->getSize(); i++) { IScan* s = g_jobOut->getElement(i); if (!s || s->getSize() <= 0) continue;
       if (s->getSize() < 10) { logf("scan with %d frame(s) discarded", s->getSize()); continue; }   // the stub left by a loss within seconds of a restart is useless (3 Nov: 3- and 9-frame scans)
       if (g_alignLive.load() && g_liveFound.load() && i == 0) { Matrix4x4D T; { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(T.m, g_liveT, sizeof g_liveT); } s->setScanTransformation(T);
-        int drop = (int)g_foundAt.load(); if (drop > 0 && drop < s->getSize() - 5) { for (int k = 0; k < drop; k++) s->remove(0); } logf("scan placed with the position found live; %d search frames discarded", drop); }
+        // 5 Nov: the frames recorded while searching belong to the same continuous tracking as the rest of this scan, so
+        // the found pose places them too — keep them (they were discarded before, losing a few seconds per join).
+        logf("scan placed with the position found live; %d search frames kept", (int)g_foundAt.load()); }
       if (g_alignLive.load() && !g_liveFound.load()) logf("position was not found during this scan; it keeps its own coordinates");
       ScanRec r; r.scan = s; r.placed = g_alignLive.load() && g_liveFound.load() && i == 0; setScanName(r, nextScanName()); r.keyFrames = (int)g_keyFrames.load(); r.maxErr = g_maxErr.load(); countScanStats(r);
       // Studio groups a scan that was placed by the live search with the scan it was placed against (the most recent
