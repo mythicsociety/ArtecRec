@@ -729,6 +729,10 @@ static void postProcessScan(IScan* s, bool optimise) {   // s carries one refere
     // publish first, then let a search already in flight finish (it may be reading this scan), then clean
     g_cleaningScan = s; for (int w = 0; w < 200 && g_searchBusy.load(); w++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
     cleanScan(s); g_cleaningScan = nullptr; nf = s->getSize();
+    // search reference right away (instant clone): after a loss mid-pass the search must compare against THIS scan,
+    // not the one before it; the reference used to arrive only after registration + refinement, 10–20 s later
+    // (5 Nov 11:03: second recovery failed, searched against scan 1 while the scanner was over the end of scan 2).
+    if (nf >= 3) { IScan* early = buildRef(s, 40); if (early) { std::lock_guard<std::mutex> l(g_scanMx); bool used = false; for (auto& rec : g_scans) if (rec.scan == s) { if (rec.ref) rec.ref->release(); rec.ref = early; used = true; break; } if (!used) early->release(); } }
     // image memory for the position search right away (~1 s), so a resume just after a tracking loss can find this
     // scan while its registration (5–15 s) still runs; the registered result replaces it when WM_POSTDONE lands
     if (g_featSearch && nf >= 3) { std::vector<FrameFeat> early = buildFeats(s, 40); std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) if (rec.scan == s) { rec.feats = std::move(early); break; } } }
