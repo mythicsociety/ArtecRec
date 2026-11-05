@@ -227,7 +227,8 @@ static void render(int w, int h, bool forShot) {
     for (auto& m : g_liveAcc) { if (liveFill && m.uv.empty()) continue; glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; std::vector<float> keep; keep.swap(m.col); drawMesh(m, grey, false, colorMode == 0); keep.swap(m.col); }   // captured surfaces: textured where available, later ones on top (distance colours, kept for the live green, hidden here)
     float cur[3] = {0.30f, 0.80f, 0.32f}; if (lost) { cur[0] = 0.9f; cur[1] = 0.2f; cur[2] = 0.15f; }
     glPolygonOffset(-0.6f * drawn - 2, -0.6f * drawn - 2);
-    if (!g_live.v.empty()) { FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur, false, false); keep.swap(m.col); } else drawMesh(m, cur, false, false); }
+    // the current frame only while scanning: after Stop it stayed on screen as a green patch (owner, 5 Nov 10:42)
+    if (scanningNow && !g_live.v.empty()) { FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur, false, false); keep.swap(m.col); } else drawMesh(m, cur, false, false); }
     glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); } }
   drawRotCentre(); deleteTrashTextures();
   if (forShot) return;
