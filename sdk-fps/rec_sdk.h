@@ -649,9 +649,9 @@ static std::wstring nextScanName() {
   for (;;) { wchar_t b[128]; swprintf(b, 128, L"%s %d", base.c_str(), n); bool used = false; for (auto& s : g_scans) if (s.name == b) used = true; if (!used) return b; n++; }
 }
 static std::wstring uniqueName(const std::wstring& base) { std::wstring n = base; int k = 2; for (;;) { bool used = false; for (auto& s : g_scans) if (s.name == n) used = true; if (!used) return n; wchar_t b[160]; swprintf(b, 160, L"%s (%d)", base.c_str(), k++); n = b; } }
-static void waitPostProcess(); static void startPostProcess(IScan* s, bool optimise);
+static bool waitPostProcess(double maxSecs); static void startPostProcess(IScan* s, bool optimise);
 static void duplicateScan(int i) {   // Studio: Duplicate → "Copy of <name>"
-  waitPostProcess(); if (i < 0 || i >= (int)g_scans.size() || !g_scans[i].scan) return; IScan* c = nullptr; createSimilarScan(&c, g_scans[i].scan); if (!c) return; cloneScan(c, g_scans[i].scan);
+  waitPostProcess(1e9); if (i < 0 || i >= (int)g_scans.size() || !g_scans[i].scan) return; IScan* c = nullptr; createSimilarScan(&c, g_scans[i].scan); if (!c) return; cloneScan(c, g_scans[i].scan);
   ScanRec r; r.scan = c; r.group = g_scans[i].group; r.keyFrames = g_scans[i].keyFrames; r.maxErr = g_scans[i].maxErr; memcpy(r.color, g_scans[i].color, sizeof r.color); setScanName(r, uniqueName(L"Copy of " + g_scans[i].name)); countScanStats(r); buildScanDisplay(r);
   { std::lock_guard<std::mutex> l(g_scanMx); g_scans.insert(g_scans.begin() + i + 1, std::move(r)); } g_dirty = true; startPostProcess(c, false);   // search reference for the copy
 }
@@ -739,6 +739,16 @@ static bool refine(IScan* s, Matrix4x4D& out, double& moved, double& rms) {
   const auto& ST = s->getScanTransformation().m; double C[4][4]; for (int r = 0; r < 3; r++) { for (int c = 0; c < 3; c++) C[r][c] = R[r][c]; C[r][3] = t[r]; } C[3][0] = C[3][1] = C[3][2] = 0; C[3][3] = 1; double N[4][4]; mul44(C, ST, N); memcpy(out.m, N, sizeof N); moved = sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]); return true;
 }
 } // namespace pa
+// 5 Nov 14:21: global registration of a 328-frame pass never returned (normally ~10 s); the auto-align after the next
+// pass waited for it and the window locked ("Not Responding") until the team killed ArtecRec. Each tidy-up step after
+// a scan now has a time limit: past it the job is cancelled through its token and the scan is kept as it was.
+template <class J> static ErrorCode execLimited(J* job, AlgorithmWorkset* ws, int maxSecs, const char* what) {
+  ICancellationTokenSource* cts = nullptr; createCancellationTokenSource(&cts); if (cts) ws->cancellation = cts->getToken();
+  std::atomic<bool> fin{false}, gaveUp{false};
+  std::thread wd([&] { for (int i = 0; i < maxSecs * 10 && !fin.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(100)); if (!fin.load() && cts) { gaveUp = true; cts->cancel(); logf("%s: no result in %d s, cancelled; scan kept as it was", what, maxSecs); } });
+  ErrorCode ec = executeJob(job, ws); fin = true; wd.join(); ws->cancellation = nullptr; if (cts) cts->release();
+  return gaveUp.load() && ec == ErrorCode_OK ? ErrorCode_OperationAborted : ec;
+}
 static void postProcessScan(IScan* s, bool optimise) {   // s carries one reference for this thread
   g_postBusy++; g_optimising = optimise; auto t0 = clk::now(); int nf = s->getSize(); IScan* r = nullptr;
   if (optimise && nf >= 1) {
@@ -756,7 +766,7 @@ static void postProcessScan(IScan* s, bool optimise) {   // s carries one refere
     IModel* in = nullptr; createModel(&in); IModel* res = nullptr; createModel(&res); in->add(s);
     alg::SerialRegistrationSettings sd; sd.scannerType = s->getScannerType(); sd.registrationType = allTex ? alg::SerialRegistrationType_FineTextured : alg::SerialRegistrationType_Fine;
     alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createSerialRegistrationAlgorithm(&a, &sd);
-    if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = res; ws.threadsCount = std::thread::hardware_concurrency(); ec = executeJob(a, &ws); a->release(); }
+    if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = res; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(a, &ws, 90, "surface optimisation"); a->release(); }
     double dt = std::chrono::duration<double>(clk::now() - t0).count();
     if (ec == ErrorCode_OK && res->getSize() > 0 && res->getElement(0) && res->getElement(0)->getSize() == nf) { r = res->getElement(0); r->addRef(); r->setScanTransformation(s->getScanTransformation()); if (s->getName()) r->setName(s->getName());
       logf("surface optimisation (fine registration, %s) of %d frames in %.1f s", allTex ? "geometry+texture" : "geometry", nf, dt); }
@@ -767,7 +777,7 @@ static void postProcessScan(IScan* s, bool optimise) {   // s carries one refere
     // a pass recorded meanwhile keeps its capture rate.
     { IScan* src = r ? r : s; IModel* gi = nullptr; createModel(&gi); gi->add(src); IModel* go = nullptr; createModel(&go); auto tg = clk::now();
       alg::GlobalRegistrationSettings gd; gd.scannerType = src->getScannerType(); gd.registrationType = alg::GlobalRegistrationType_Geometry; alg::IAlgorithm* ga = nullptr; ErrorCode eg = alg::createGlobalRegistrationAlgorithm(&ga, &gd);
-      if (eg == ErrorCode_OK && ga) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = gi; ws.out = go; ws.threadsCount = std::max(1u, std::thread::hardware_concurrency() / 2); eg = executeJob(ga, &ws); ga->release(); }
+      if (eg == ErrorCode_OK && ga) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = gi; ws.out = go; ws.threadsCount = std::max(1u, std::thread::hardware_concurrency() / 2); eg = execLimited(ga, &ws, 60, "global registration"); ga->release(); }
       double dg = std::chrono::duration<double>(clk::now() - tg).count();
       if (eg == ErrorCode_OK && go->getSize() > 0 && go->getElement(0) && go->getElement(0)->getSize() == nf) { IScan* g = go->getElement(0); g->addRef(); g->setScanTransformation(src->getScanTransformation()); if (src->getName()) g->setName(src->getName()); if (r) r->release(); r = g; logf("global registration (geometry) of %d frames in %.1f s", nf, dg); }
       else logf("global registration failed 0x%08X in %.1f s; scan kept", (unsigned)eg, dg);
@@ -782,7 +792,7 @@ static void postProcessScan(IScan* s, bool optimise) {   // s carries one refere
   PostMessageW(g_hwnd, WM_POSTDONE, 0, (LPARAM)pr); g_postBusy--;
 }
 static void startPostProcess(IScan* s, bool optimise = true) { s->addRef(); std::lock_guard<std::mutex> l(g_postMx); g_postThreads.emplace_back(postProcessScan, s, optimise); }
-static void waitPostProcess() { while (g_postBusy.load() > 0) { MSG m; while (PeekMessageW(&m, nullptr, WM_POSTDONE, WM_POSTDONE, PM_REMOVE)) DispatchMessageW(&m); Sleep(30); } }   // before save / align / duplicate
+static bool waitPostProcess(double maxSecs) { auto t0 = clk::now(); while (g_postBusy.load() > 0) { if (std::chrono::duration<double>(clk::now() - t0).count() > maxSecs) return false; MSG m; while (PeekMessageW(&m, nullptr, WM_POSTDONE, WM_POSTDONE, PM_REMOVE)) DispatchMessageW(&m); Sleep(30); } return true; }   // before save / align / duplicate
 static void rebuildMaster();
 static void onPostDone(PostResult* pr) {   // UI thread
   { std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) if (rec.scan == pr->src) { if (pr->res != pr->src) { rec.scan->release(); rec.scan = pr->res; pr->res = nullptr; } rec.disp = std::move(pr->disp); memcpy(rec.texAvg, pr->texAvg, sizeof rec.texAvg); rec.hasTexAvg = pr->hasTexAvg; if (rec.ref) rec.ref->release(); rec.ref = pr->ref; pr->ref = nullptr; rec.feats = std::move(pr->feats); countScanStats(rec); break; } }
@@ -827,7 +837,9 @@ static void rebuildMaster() { g_master->clear(); for (auto& r : g_scans) if (r.s
 
 static std::thread g_alignThread;
 static void runAutoAlign() {   // aligns the visible scans to each other (Studio: "Auto-align new scans with those marked in Workspace")
-  waitPostProcess(); g_mode = M_Aligning; g_alignMsg = L"aligning…";
+  // never lock the window for good: if a scan is still being tidied after 3 min (the limits above should prevent it), skip
+  if (!waitPostProcess(180)) { logf("auto-align skipped: a scan is still being processed after 3 min"); g_alignMsg = L"auto-align skipped (still processing a scan) - press Auto-align later"; return; }
+  g_mode = M_Aligning; g_alignMsg = L"aligning…";
   g_alignThread = std::thread([] {
     IModel* in = nullptr; createModel(&in); std::vector<int> map; for (int i = 0; i < (int)g_scans.size(); i++) if (g_scans[i].visible && g_scans[i].scan) { ensureNormals(g_scans[i].scan); in->add(g_scans[i].scan); map.push_back(i); }
     ErrorCode ec = ErrorCode_OK; double secs = 0; IModel* out = nullptr; createModel(&out);
@@ -904,7 +916,7 @@ static ErrorCode runJobPumped(IJob* job, AlgorithmWorkset* ws, const wchar_t* wh
 }
 static bool removeDir(const std::wstring& dir) { std::wstring dz = dir; dz.push_back(L'\0'); SHFILEOPSTRUCTW op = {}; op.wFunc = FO_DELETE; op.pFrom = dz.c_str(); op.fFlags = FOF_NO_UI; return SHFileOperationW(&op) == 0; }
 static bool saveProject(const std::wstring& sproj) {
-  waitPostProcess(); std::wstring dir = projDir(sproj), name = sproj.substr(dir.size() + 1);
+  waitPostProcess(1e9); std::wstring dir = projDir(sproj), name = sproj.substr(dir.size() + 1);
   // The SDK saver cannot write into an existing project folder (second save of wall_sdk_9, 2 Nov: 0x80010104).
   // Studio simply overwrites. So: save into a temporary sibling folder, then swap it in; the old copy is removed
   // only after the new one is complete.
@@ -922,7 +934,7 @@ static bool saveProject(const std::wstring& sproj) {
     removeDir(old); }
   saveGroups(sproj); writeStudioNames(sproj); g_dirty = false; g_projPath = sproj; return true;
 }
-static void clearProject() { waitPostProcess(); std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); }
+static void clearProject() { waitPostProcess(1e9); std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); }
 static bool openProject(const std::wstring& sproj) {
   prj::IProject* p = nullptr; ErrorCode ec = prj::openProject(&p, sproj.c_str()); if (ec != ErrorCode_OK || !p) { logf("openProject 0x%08X", (unsigned)ec); return false; }
   int n = p->getEntryCount(); std::vector<Uuid> ids; std::vector<std::wstring> names;
