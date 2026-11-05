@@ -190,7 +190,7 @@ struct ScanObs : public ScannerObserverBase {
 static ScanObs* g_scanObs;
 
 // live auto-align ("Searching for position"): the first frames of a new scan are matched against the reference scans
-static std::atomic<bool> g_alignLive{false}, g_liveFound{false}, g_searchBusy{false}, g_searchStop{false}; static double g_liveT[4][4]; static std::mutex g_liveTmx; static bool g_forceAlign = false;
+static std::atomic<bool> g_alignLive{false}, g_liveFound{false}, g_searchBusy{false}, g_searchStop{false}; static bool g_segPushedAtPause = false; /* the last Pause/Resume segment was already recorded at Pause (C6) */ static double g_liveT[4][4]; static std::mutex g_liveTmx; static bool g_forceAlign = false;
 static std::atomic<long> g_foundAt{0}, g_storedFrames{0};   // frames captured before the position was found are discarded, as Studio does not record them
 static std::vector<bool> g_frameBad; static std::mutex g_frameBadMx;   // per stored frame: registration failed (Studio records no such frame)
 static IScan* g_tempScan; static IScan* g_tempTex; static std::atomic<int> g_tempCount{0}; static std::mutex g_tempMx; struct AtomicTime { std::atomic<long long> t{0}; void operator=(clk::time_point v) { t = v.time_since_epoch().count(); } operator clk::time_point() const { return clk::time_point(clk::duration(t.load())); } };
@@ -315,7 +315,8 @@ struct Obs : public ScanningProcedureObserverBase {
   }
   // review C4: the search holds the procedure's own live frames; the SDK post-processes their textures after this
   // call, so the search is stopped and given up to 5 s to let go of them first.
-  void onScanningFinished(int) override { g_searchStop = true; for (int i = 0; i < 100 && g_searchBusy.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50)); if (g_searchBusy.load()) logf("the position search did not stop within 5 s of the end of the scan"); }
+  void onScanningFinished(int) override { g_searchStop = true; for (int i = 0; i < 100 && g_searchBusy.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50)); if (g_searchBusy.load()) logf("the position search did not stop within 5 s of the end of the scan");
+    { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { g_tempScan->release(); g_tempScan = nullptr; } if (g_tempTex) { g_tempTex->release(); g_tempTex = nullptr; } } }   // the SDK asks for its textures to be released here
 };
 static Obs* g_obs;
 
@@ -337,12 +338,14 @@ static void applyLiveSettings() {
   float hi = g_scanner->getTextureGainMax(); if (hi > g_gainDefault) g_scanner->setTextureGain(g_gainDefault + (hi - g_gainDefault) * S.texBright);   // Normal = default gain, High = max
   if (g_proc) { g_proc->setScanningRange(S.nearMm.load(), S.farMm.load()); g_proc->setSensitivity(g_sensDefault + (1.f - g_sensDefault) * S.sens); }   // Normal = default, Extreme = 1
 }
+static void joinSearchBounded();
 // Reset per-scan state; arm the live position search when recording with references (called at Record, also from Preview).
 static std::atomic<int> g_hybridNext{0};   // rotation index over the hybrid-resume windows
 static void prepareRecording(bool recording) {
+  g_segPushedAtPause = false;   // a new segment starts
   // review C8: a search still running from before Pause/Resume or a restart is stopped and joined before the state is
   // reset, so its late result cannot place the new pass (its jobs are cancelled through g_searchStop, 20 s at most)
-  g_searchStop = true; if (g_searchThread.joinable()) g_searchThread.join(); g_searchStop = false; g_searchBusy = false;
+  joinSearchBounded(); g_searchStop = false;
   { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { g_tempScan->release(); g_tempScan = nullptr; } if (g_tempTex) { g_tempTex->release(); g_tempTex = nullptr; } g_tempCount = 0; }
   int refs = 0; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) if (s.visible && s.scan && (s.group < 0 || (s.group < (int)g_groups.size() && g_groups[s.group].visible))) refs++; }
   g_liveFound = false; g_foundAt = 0; g_searchTries = 0; g_hybridNext = 0; g_lastSearch = clk::now(); { std::lock_guard<std::mutex> l(g_frameBadMx); g_frameBad.clear(); }
@@ -354,6 +357,9 @@ static void prepareRecording(bool recording) {
   g_alignLive = (S.autoAlign || g_forceAlign) && refs > 0 && recording;   // g_forceAlign: resuming after lost tracking (Studio's "Scan using auto-alignment" works regardless of the Scan-panel checkbox)
   if (g_alignLive) { std::lock_guard<std::mutex> l(g_tempMx); createScan(&g_tempScan, g_scannerId.type); createScan(&g_tempTex, g_scannerId.type); }
 }
+// Review B1 (second pass): the UI never joins the search without a bound. Stop it, wait up to 10 s, then let it go.
+static void joinSearchBounded() { g_searchStop = true; for (int i = 0; i < 200 && g_searchBusy.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  if (g_searchThread.joinable()) { if (g_searchBusy.load()) { logf("the position search did not stop in 10 s: left to finish on its own"); g_searchThread.detach(); } else g_searchThread.join(); } g_searchBusy = false; }
 // Review C6: one live-search result per recorded segment (Pause/Resume makes one scan per segment).
 static std::vector<logic::SegmentPose> g_segPoses;
 static void pushSegmentPose() { logic::SegmentPose p; p.found = g_alignLive.load() && g_liveFound.load(); { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(p.T, g_liveT, sizeof p.T); } g_segPoses.push_back(p); }
@@ -361,7 +367,7 @@ static void pushSegmentPose() { logic::SegmentPose p; p.found = g_alignLive.load
 // (if it ever comes) is ignored by generation, and the app goes to Idle with g_stuck set so the scans can be saved.
 static std::atomic<int> g_jobGen{0};
 static bool startProcedure(ScanningState initial) {
-  if (g_stuck) { logf("start refused: the scanner job is stuck; restart ArtecRec"); return false; }
+  if (g_stuck) { logf("start refused: the scanner job is stuck; restart ArtecRec"); return false; } g_segPushedAtPause = false;
   if (!g_scanner) { logf("start refused: no scanner connected"); return false; }
   ScanningProcedureSettings st; initializeScanningProcedureSettings(&st);
   bool tex = S.recordTexture; bool hybrid = S.tracking == 0 && tex;
@@ -402,10 +408,11 @@ static void stopProcedure() { if (g_proc && !g_jobDone) { g_mode = M_Stopping; g
 // if the job still has not returned, it is given up so the scans already in the Workspace can be saved.
 static bool cancelStuckProcedure() {
   if (g_jobDone || !g_stopAsked || !g_proc) return false; double since = std::chrono::duration<double>(clk::now() - g_stopAt).count();
-  if (!g_cancelSent && since >= 8.0) { g_cancelSent = true; std::lock_guard<std::mutex> l(g_ctsMx); if (g_cts) g_cts->cancel(); logf("Stop did not finish in 8 s (scanner not answering): procedure cancelled"); return false; }
-  if (g_cancelSent && since >= 20.0) { logf("the scanning job did not end 12 s after the cancel: abandoned; the scans already recorded can be saved");
+  // second review: a long textured pass can legitimately take a while to finish its textures after Stop: 15 s, then 45 s
+  if (!g_cancelSent && since >= 15.0) { g_cancelSent = true; std::lock_guard<std::mutex> l(g_ctsMx); if (g_cts) g_cts->cancel(); logf("Stop did not finish in 15 s (scanner not answering): procedure cancelled"); return false; }
+  if (g_cancelSent && since >= 60.0) { logf("the scanning job did not end 45 s after the cancel: abandoned; the scans already recorded can be saved");
     ++g_jobGen; g_job.detach(); g_proc->release(); g_proc = nullptr; if (g_jobOut) { g_jobOut->release(); g_jobOut = nullptr; }
-    g_searchStop = true; if (g_searchThread.joinable()) g_searchThread.detach();
+    g_searchStop = true; if (g_searchThread.joinable()) g_searchThread.detach(); g_searchBusy = false;
     { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { g_tempScan->release(); g_tempScan = nullptr; } if (g_tempTex) { g_tempTex->release(); g_tempTex = nullptr; } } g_alignLive = false;
     { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); g_live = FrameMesh(); }
     g_stuck = true; g_mode = M_Idle; return true; }
@@ -697,7 +704,7 @@ static std::wstring nextScanName() {
 static std::wstring uniqueName(const std::wstring& base) { std::wstring n = base; int k = 2; for (;;) { bool used = false; for (auto& s : g_scans) if (s.name == n) used = true; if (!used) return n; wchar_t b[160]; swprintf(b, 160, L"%s (%d)", base.c_str(), k++); n = b; } }
 static bool waitPostProcess(double maxSecs); static void startPostProcess(IScan* s, bool optimise); static bool postIdle();
 static void duplicateScan(int i) {   // Studio: Duplicate → "Copy of <name>"
-  if (!postIdle() || i < 0 || i >= (int)g_scans.size() || !g_scans[i].scan) return; IScan* c = nullptr; createSimilarScan(&c, g_scans[i].scan); if (!c) return; cloneScan(c, g_scans[i].scan);
+  if (i < 0 || i >= (int)g_scans.size() || !g_scans[i].scan) return; /* the Workspace allows this only when idle (editOk) */ IScan* c = nullptr; createSimilarScan(&c, g_scans[i].scan); if (!c) return; cloneScan(c, g_scans[i].scan);
   ScanRec r; r.scan = c; r.group = g_scans[i].group; r.keyFrames = g_scans[i].keyFrames; r.maxErr = g_scans[i].maxErr; memcpy(r.color, g_scans[i].color, sizeof r.color); setScanName(r, uniqueName(L"Copy of " + g_scans[i].name)); countScanStats(r); buildScanDisplay(r);
   { std::lock_guard<std::mutex> l(g_scanMx); g_scans.insert(g_scans.begin() + i + 1, std::move(r)); } g_dirty = true; startPostProcess(c, false);   // search reference for the copy
 }
@@ -800,8 +807,12 @@ static bool refine(IScan* s, Matrix4x4D& out, double& moved, double& rms, double
 // At most 3 tidy-up threads work at once (review E2: opening a 40-scan project started 40 full clones together).
 struct PostGate { std::mutex m; std::condition_variable cv; int n = 0; void enter() { std::unique_lock<std::mutex> l(m); cv.wait(l, [&] { return n < 3; }); n++; } void leave() { { std::lock_guard<std::mutex> l(m); n--; } cv.notify_one(); } };
 static PostGate g_postGate;
-static void postProcessScan(IScan* s, bool optimise) {   // s carries one reference for this thread; g_postBusy was raised by startPostProcess
-  g_postGate.enter(); auto t0 = clk::now(); int nf = s->getSize(); IScan* r = nullptr;
+// Second review: a tidy-up whose SDK step ignores its cancel must not block saving for good. Each item is tracked;
+// after 4 minutes the UI gives it up (count lowered, gate slot freed), and a late result is thrown away.
+struct PostItem { IScan* s; clk::time_point t0; std::mutex m; bool done = false, abandoned = false, gated = false; };
+static std::mutex g_itemsMx; static std::vector<std::shared_ptr<PostItem>> g_items;
+static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> item) {   // s carries one reference for this thread; g_postBusy was raised by startPostProcess
+  g_postGate.enter(); { std::lock_guard<std::mutex> l(item->m); if (item->abandoned) { g_postGate.leave(); s->release(); return; } item->gated = true; item->t0 = clk::now(); } auto t0 = clk::now(); int nf = s->getSize(); IScan* r = nullptr;
   if (optimise && nf >= 1) {
     // publish first, then let a search already in flight finish (it may be reading this scan); if it does not finish in
     // 20 s, skip cleaning rather than rewrite frames under it (review C7)
@@ -847,13 +858,18 @@ static void postProcessScan(IScan* s, bool optimise) {   // s carries one refere
   PostResult* pr = new PostResult(); pr->src = s; pr->res = r ? r : s; ScanRec tmp; tmp.scan = pr->res; buildScanDisplay(tmp); pr->disp = std::move(tmp.disp); memcpy(pr->texAvg, tmp.texAvg, sizeof pr->texAvg); pr->hasTexAvg = tmp.hasTexAvg; tmp.scan = nullptr;
   pr->ref = nf >= 3 ? buildRef(pr->res, 40) : nullptr;
   if (g_featSearch && nf >= 3) pr->feats = buildFeats(pr->res, 40);
-  g_postGate.leave();
+  { std::lock_guard<std::mutex> l(item->m); if (item->abandoned) { if (pr->ref) pr->ref->release(); for (auto& fm : pr->disp) (void)fm; if (pr->res && pr->res != pr->src) pr->res->release(); pr->src->release(); delete pr; return; } item->done = true; g_postGate.leave(); }
   if (!PostMessageW(g_hwnd, WM_POSTDONE, 0, (LPARAM)pr)) { logf("tidy-up result could not be delivered (window gone)"); }
 }
 // Review C3/A3/E3: the busy count is raised here, on the UI thread, before the thread exists, and lowered by
 // onPostDone on the UI thread after the result is swapped in. postIdle() is therefore exact: no queued result exists.
 // Threads are detached: each holds its own references, and nothing waits for them at exit (review B6).
-static void startPostProcess(IScan* s, bool optimise = true) { s->addRef(); g_postBusy++; g_optimising = true; std::thread(postProcessScan, s, optimise).detach(); }
+static void startPostProcess(IScan* s, bool optimise = true) { s->addRef(); g_postBusy++; g_optimising = true; auto it = std::make_shared<PostItem>(); it->s = s; it->t0 = clk::now(); { std::lock_guard<std::mutex> l(g_itemsMx); g_items.push_back(it); } std::thread(postProcessScan, s, optimise, it).detach(); }
+// UI timer: give up a tidy-up running for more than 4 minutes (the scan stays as recorded). Returns true if one was given up.
+static bool abandonStuckPost() { bool any = false; std::lock_guard<std::mutex> l(g_itemsMx);
+  for (auto it = g_items.begin(); it != g_items.end();) { auto& p = *it; bool drop = false; { std::lock_guard<std::mutex> lk(p->m); if (p->done) drop = true; else if (p->gated && std::chrono::duration<double>(clk::now() - p->t0).count() > 240) { p->abandoned = true; drop = true; any = true; g_postGate.leave(); if (g_postBusy.load() > 0) g_postBusy--; } }
+    if (drop) it = g_items.erase(it); else ++it; }
+  if (any) { logf("a scan's processing did not finish in 4 min: given up, the scan is kept as recorded"); g_optimising = g_postBusy.load() > 0; } return any; }
 static bool postIdle() { return g_postBusy.load() == 0; }
 static bool waitPostProcess(double maxSecs) { auto t0 = clk::now(); while (g_postBusy.load() > 0) { if (std::chrono::duration<double>(clk::now() - t0).count() > maxSecs) return false; MSG m; while (PeekMessageW(&m, nullptr, WM_POSTDONE, WM_POSTDONE, PM_REMOVE)) DispatchMessageW(&m); Sleep(30); } return true; }   // used only where the UI already guarantees idle
 static void rebuildMaster();
@@ -867,12 +883,12 @@ static void onPostDone(PostResult* pr) {   // UI thread
 static int onJobDone() {
   if (g_job.joinable()) g_job.join(); int added = 0;
   if (g_jobOut) {
-    g_searchStop = true; if (g_searchThread.joinable()) g_searchThread.join(); g_searchBusy = false;   // review B1: stopped, so the join is short
+    joinSearchBounded();   // review B1: stopped, at most 10 s
     // review C6: one pose per segment (Pause/Resume); the last segment's state is still live
-    std::vector<logic::SegmentPose> poses = g_segPoses; pushSegmentPose(); poses.push_back(g_segPoses.back()); g_segPoses.clear();
-    bool perSegment = (int)poses.size() == g_jobOut->getSize();
+    if (!g_segPushedAtPause) pushSegmentPose(); g_segPushedAtPause = false; std::vector<logic::SegmentPose> poses = g_segPoses; g_segPoses.clear();
+    bool perSegment = (int)poses.size() == g_jobOut->getSize(); if (!perSegment) logf("%d segment result(s) for %d scan(s): no live placement this time; auto-align will place them", (int)poses.size(), g_jobOut->getSize());
     for (int i = 0; i < g_jobOut->getSize(); i++) { IScan* s = g_jobOut->getElement(i); if (!s || s->getSize() <= 0) continue;
-      bool found = perSegment ? poses[i].found : (i == 0 && poses.back().found); const double (*PT)[4] = perSegment ? poses[i].T : poses.back().T;
+      bool found = perSegment && poses[i].found; const double (*PT)[4] = perSegment ? poses[i].T : nullptr;
       if (s->getSize() < 10) { logf("scan with %d frame(s) discarded", s->getSize()); continue; }   // the stub left by a loss within seconds of a restart is useless (3 Nov: 3- and 9-frame scans)
       if (found) { Matrix4x4D T; memcpy(T.m, PT, sizeof T.m); s->setScanTransformation(T);
         // 5 Nov: the frames recorded while searching belong to the same continuous tracking as the rest of this scan, so
@@ -909,12 +925,13 @@ static std::thread g_alignThread; static std::atomic<int> g_alignGen{0}; static 
 // Review B2/C1/C9: auto-align never waits on the UI thread. It starts only when no scan is being tidied (otherwise it is
 // queued: g_pendingAlign, run from the timer); it works on its own references to the scans and applies the results to
 // the records holding the same scan objects (not by index); display meshes are rebuilt outside the scan lock.
-static void runAutoAlign() {   // aligns the visible scans to each other (Studio: "Auto-align new scans with those marked in Workspace")
-  if (!postIdle() || g_mode.load() != M_Idle) { g_pendingAlign = true; return; }
+// manual (Edit > Auto-align visible scans now): only the first visible scan stays fixed, every other visible scan may move.
+static void runAutoAlign(bool manual = false) {   // aligns the visible scans to each other (Studio: "Auto-align new scans with those marked in Workspace")
+  if (!postIdle() || g_mode.load() != M_Idle) { if (!manual) g_pendingAlign = true; return; }
   g_pendingAlign = false; g_mode = M_Aligning; g_alignMsg = L"aligning..."; g_alignStart = clk::now(); int gen = ++g_alignGen;
   if (g_alignThread.joinable()) g_alignThread.detach();
   struct Item { IScan* s; bool placed; std::wstring name; };
-  std::vector<Item> items; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.visible && r.scan) { r.scan->addRef(); items.push_back({r.scan, r.placed, r.name}); } }
+  std::vector<Item> items; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.visible && r.scan) { r.scan->addRef(); items.push_back({r.scan, manual ? items.empty() : r.placed, r.name}); } }
   g_alignThread = std::thread([items, gen] {
     IModel* in = nullptr; createModel(&in); for (auto& it : items) { ensureNormals(it.s); in->add(it.s); }
     ErrorCode ec = ErrorCode_OK; double secs = 0; IModel* out = nullptr; createModel(&out); int moved = 0;
@@ -939,7 +956,7 @@ static void runAutoAlign() {   // aligns the visible scans to each other (Studio
     }
     out->release(); in->release();
     if (gen == g_alignGen.load()) {   // not abandoned: apply, then rebuild the moved scans' display outside the lock
-      for (auto& mv : moves) { ScanRec tmp; { std::lock_guard<std::mutex> l(g_scanMx); bool still = false; for (auto& r : g_scans) if (r.scan == mv.s) { r.scan->setScanTransformation(mv.T); r.placed = true; still = true; } if (!still) continue; }
+      for (auto& mv : moves) { ScanRec tmp; { std::lock_guard<std::mutex> l(g_scanMx); bool still = false; for (auto& r : g_scans) if (r.scan == mv.s) { r.scan->setScanTransformation(mv.T); still = true; } if (!still) continue; }
         tmp.scan = mv.s; buildScanDisplay(tmp); { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.scan == mv.s) { r.disp = std::move(tmp.disp); memcpy(r.texAvg, tmp.texAvg, sizeof r.texAvg); r.hasTexAvg = tmp.hasTexAvg; } } tmp.scan = nullptr; }
       wchar_t m[96]; if (ec == ErrorCode_OK) swprintf(m, 96, L"aligned in %.0f s", secs); else if (ec == ErrorCode_OperationFailed) wcscpy(m, L"could not align the new scan (too little overlap)"); else if (ec == ErrorCode_OperationAborted) wcscpy(m, L"auto-align gave up after 60 s (too little overlap?)"); else swprintf(m, 96, L"align failed (0x%08X)", (unsigned)ec);
       g_alignMsg = std::wstring(m); PostMessageW(g_hwnd, WM_ALIGNDONE, (WPARAM)gen, 0); }
@@ -994,8 +1011,8 @@ static ErrorCode runJobPumped(IJob* job, AlgorithmWorkset* ws, const wchar_t* wh
 }
 static bool removeDir(const std::wstring& dir) { std::wstring dz = dir; dz.push_back(L'\0'); SHFILEOPSTRUCTW op = {}; op.wFunc = FO_DELETE; op.pFrom = dz.c_str(); op.fFlags = FOF_NO_UI; return SHFileOperationW(&op) == 0; }
 static bool dirExists(const std::wstring& d) { DWORD a = GetFileAttributesW(d.c_str()); return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY); }
-static std::vector<logic::FolderEntry> listFolder(const std::wstring& dir) {
-  std::vector<logic::FolderEntry> v; WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd); if (h == INVALID_HANDLE_VALUE) return v;
+static std::vector<logic::FolderEntry> listFolder(const std::wstring& dir, bool* ok = nullptr) {
+  std::vector<logic::FolderEntry> v; if (ok) *ok = false; WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd); if (h == INVALID_HANDLE_VALUE) return v; if (ok) *ok = true;
   do { std::wstring n = fd.cFileName; if (n == L"." || n == L"..") continue; v.push_back({n, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0}); } while (FindNextFileW(h, &fd)); FindClose(h); return v; }
 // Review A1/A2/A3/F6. Save:
 //  - only when no scan is being tidied (the caller queues otherwise), from a snapshot model the UI cannot change;
@@ -1006,21 +1023,25 @@ static std::vector<logic::FolderEntry> listFolder(const std::wstring& dir) {
 static bool saveProject(const std::wstring& sproj) {
   g_saveErr.clear(); if (!postIdle()) { g_saveErr = L"Scans are still being processed. Try again in a moment."; return false; }
   std::wstring dir = projDir(sproj), name = sproj.substr(dir.size() + 1), stem = logic::stemOf(name);
-  bool exists = dirExists(dir); std::vector<logic::FolderEntry> entries = exists ? listFolder(dir) : std::vector<logic::FolderEntry>();
+  bool exists = dirExists(dir); bool listed = true; std::vector<logic::FolderEntry> entries = exists ? listFolder(dir, &listed) : std::vector<logic::FolderEntry>();
+  // second review: re-read the project on disk now: Studio may have added models since ArtecRec opened or saved it
+  bool foreignNow = g_projForeign && logic::iEquals(sproj, g_projPath); std::wstring onDisk = dir + L"\\" + name;
+  if (exists && GetFileAttributesW(onDisk.c_str()) != INVALID_FILE_ATTRIBUTES) { prj::IProject* q = nullptr; if (prj::openProject(&q, onDisk.c_str()) == ErrorCode_OK && q) { int n = q->getEntryCount(); for (int i = 0; i < n; i++) { prj::EntryInfo e; IString* nm = nullptr; if (q->getEntry(i, &e, &nm) == ErrorCode_OK && e.type != prj::EntryType_Scan) foreignNow = true; if (nm) nm->release(); } q->release(); } }
   bool ours = GetFileAttributesW((dir + L"\\artecrec-project.txt").c_str()) != INVALID_FILE_ATTRIBUTES || (logic::iEquals(sproj, g_projPath) && GetFileAttributesW((dir + L"\\artecrec-groups.txt").c_str()) != INVALID_FILE_ATTRIBUTES);
-  logic::SwapVerdict v = logic::canReplaceFolder(exists, entries, stem, ours, g_projForeign && logic::iEquals(sproj, g_projPath));
-  if (v == logic::Swap_Foreign || v == logic::Swap_NotOurs) { g_saveErr = L"The folder\n" + dir + L"\nalready holds other files (or a project ArtecRec did not make). ArtecRec will not replace it.\n\nUse Save project as... with a new name."; logf("save refused: %ls is not this project's own folder", dir.c_str()); return false; }
+  logic::SwapVerdict v = logic::canReplaceFolder(exists, entries, stem, ours, foreignNow, listed);
+  if (v == logic::Swap_Foreign || v == logic::Swap_NotOurs) { g_saveErr = foreignNow ? L"The project in\n" + dir + L"\nnow holds models made in Artec Studio. ArtecRec will not replace it.\n\nUse Save project as... with a new name." : L"The folder\n" + dir + L"\nalready holds other files (or a project ArtecRec did not make). ArtecRec will not replace it.\n\nUse Save project as... with a new name."; logf("save refused: %ls is not this project's own folder", dir.c_str()); return false; }
   bool swap = exists; /* the SDK saver cannot write into an existing folder, even an empty one */ std::wstring outDir = swap ? dir + L"__saving" : dir, outProj = outDir + L"\\" + name;
   if (swap && dirExists(outDir)) removeDir(outDir);   // our own leftover from an interrupted save
-  if (!dirExists(outDir) && SHCreateDirectoryExW(nullptr, outDir.c_str(), nullptr) != ERROR_SUCCESS && !dirExists(outDir)) { g_saveErr = L"Could not create the folder\n" + outDir + L"\n(is the drive full or read-only?)"; return false; }
-  prj::ProjectSettings ps; ps.path = outProj.c_str(); prj::IProject* p = nullptr; ErrorCode ec = prj::createNewProject(&p, &ps); if (ec != ErrorCode_OK || !p) { logf("createNewProject 0x%08X", (unsigned)ec); g_saveErr = L"The scanner software could not create the project file."; if (swap) removeDir(outDir); return false; }
+  bool created = !dirExists(outDir);   // a first save that fails removes the folder it made (second review: a partial folder blocked later saves)
+  if (created && SHCreateDirectoryExW(nullptr, outDir.c_str(), nullptr) != ERROR_SUCCESS && !dirExists(outDir)) { g_saveErr = L"Could not create the folder\n" + outDir + L"\n(is the drive full or read-only?)"; return false; }
+  prj::ProjectSettings ps; ps.path = outProj.c_str(); prj::IProject* p = nullptr; ErrorCode ec = prj::createNewProject(&p, &ps); if (ec != ErrorCode_OK || !p) { logf("createNewProject 0x%08X", (unsigned)ec); g_saveErr = L"The scanner software could not create the project file."; if (swap || created) removeDir(outDir); return false; }
   prj::ProjectSaverSettings ss; ss.path = outProj.c_str(); generateUuid(&ss.projectId); ss.compressionLevel = 0; IJob* saver = nullptr; ec = p->createSaver(&saver, &ss);
-  if (ec != ErrorCode_OK || !saver) { logf("createSaver 0x%08X", (unsigned)ec); p->release(); g_saveErr = L"The scanner software could not start saving."; if (swap) removeDir(outDir); return false; }
+  if (ec != ErrorCode_OK || !saver) { logf("createSaver 0x%08X", (unsigned)ec); p->release(); g_saveErr = L"The scanner software could not start saving."; if (swap || created) removeDir(outDir); return false; }
   IModel* snap = nullptr; createModel(&snap); { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.scan) snap->add(r.scan); }   // snapshot: the saver never sees g_master change (review A3)
   AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = snap; ws.threadsCount = std::thread::hardware_concurrency();
   auto t0 = clk::now(); ec = runJobPumped(saver, &ws, L"Saving project..."); saver->release(); p->release(); snap->release();
   logf("save 0x%08X %.1f s -> %s%s", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), logic::utf8(sproj).c_str(), swap ? " (replacing the existing copy; the old one is kept as __previous)" : "");
-  if (ec != ErrorCode_OK) { if (swap) removeDir(outDir); g_saveErr = L"The scanner software reported an error while saving (code " + std::to_wstring((unsigned)ec) + L"). Nothing was changed on disk."; return false; }
+  if (ec != ErrorCode_OK) { if (swap || created) removeDir(outDir); g_saveErr = L"The scanner software reported an error while saving (code " + std::to_wstring((unsigned)ec) + L")." + (swap ? L" The previous copy of the project is unchanged." : L" Nothing was kept; save again, if possible to another drive."); return false; }
   if (swap) { std::wstring prev = dir + L"__previous"; if (dirExists(prev)) removeDir(prev);
     if (!MoveFileExW(dir.c_str(), prev.c_str(), 0)) { DWORD e = GetLastError(); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nbut the old folder could not be moved aside (error " + std::to_wstring(e) + L"; is a window open on it?). Close Explorer windows on it and save again."; logf("could not move the old project folder aside (error %lu)", e); return false; }
     if (!MoveFileExW(outDir.c_str(), dir.c_str(), 0)) { DWORD e = GetLastError(); MoveFileExW(prev.c_str(), dir.c_str(), 0); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nand the old project is unchanged (error " + std::to_wstring(e) + L")."; logf("could not move the new project folder in (error %lu)", e); return false; } }

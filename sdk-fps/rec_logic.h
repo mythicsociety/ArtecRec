@@ -46,10 +46,13 @@ inline std::wstring saveTarget(const std::wstring& picked) {
 struct FolderEntry { std::wstring name; bool dir; };
 enum SwapVerdict { Swap_New, Swap_Ok, Swap_Foreign, Swap_NotOurs };
 inline bool isProjectFile(const std::wstring& name, const std::wstring& stem) {
-  return iEquals(name, stem + L".sproj") || iEquals(name, L"artecrec-groups.txt") || iEquals(name, L"artecrec-project.txt") || iEquals(name, L"Scans") || iEquals(name, L"Models") || iEquals(name, L"Data") || iEquals(name, L"Thumbnails");
+  std::wstring n = iEndsWith(name, L".tmp") ? name.substr(0, name.size() - 4) : name;   // a leftover of an interrupted atomic write
+  return iEquals(n, stem + L".sproj") || iEquals(n, L"artecrec-groups.txt") || iEquals(n, L"artecrec-project.txt") || iEquals(n, L"Scans") || iEquals(n, L"Models") || iEquals(n, L"Data") || iEquals(n, L"Thumbnails");
 }
-inline SwapVerdict canReplaceFolder(bool exists, const std::vector<FolderEntry>& entries, const std::wstring& stem, bool hasMarker, bool openedFromStudioWithOtherEntries) {
+// listedOk=false (the folder could not be read) is treated as foreign: never swap what could not be checked.
+inline SwapVerdict canReplaceFolder(bool exists, const std::vector<FolderEntry>& entries, const std::wstring& stem, bool hasMarker, bool openedFromStudioWithOtherEntries, bool listedOk = true) {
   if (!exists) return Swap_New;
+  if (!listedOk) return Swap_Foreign;
   if (entries.empty()) return Swap_Ok;   // empty folder: nothing to lose
   if (openedFromStudioWithOtherEntries) return Swap_Foreign;
   for (auto& e : entries) if (!isProjectFile(e.name, stem)) return Swap_Foreign;
@@ -116,7 +119,7 @@ struct RefineVerdict { bool ok; const char* why; };
 inline RefineVerdict acceptRefine(double movedMm, double rotDeg, double matchedShare) {
   if (movedMm > 8.0) return {false, "it would move the pass more than 8 mm"};
   if (rotDeg > 2.0) return {false, "it would turn the pass more than 2 degrees"};
-  if (matchedShare < 0.30) return {false, "too few points overlap the other passes"};
+  if (matchedShare < 0.10) return {false, "too few points overlap the other passes"};   // share of the whole pass; strips overlap 20-40 %
   return {true, ""};
 }
 inline double rotationDeg(const double R[3][3]) { double c = (R[0][0] + R[1][1] + R[2][2] - 1) / 2; c = std::max(-1.0, std::min(1.0, c)); return std::acos(c) * 180.0 / 3.14159265358979; }
