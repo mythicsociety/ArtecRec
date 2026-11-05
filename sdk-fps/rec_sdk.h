@@ -297,7 +297,7 @@ struct Obs : public ScanningProcedureObserverBase {
     // holes on screen. Key frames only (earlier) left the holes visible until Stop.
     // 5 Nov, owner: Studio shows the area covered in this pass as a dense green; keep the distance colours on the
     // accumulated frames when "Show distance color" is on (they are drawn flat, unlit — rec_view.h).
-    if (rec && !lost && i->frameState == FrameState_Ok && (i->geometryKeyFrame || (g_frames.load() % 2 == 0))) { FrameMesh k = m; if (!S.distColor) k.col.clear(); if (f->isTextured()) { grabTexture(f, k); if (!k.uv.empty()) { for (int a = 0; a < 3; a++) g_liveTexAvg[a] = g_liveTexSet ? g_liveTexAvg[a] * 0.8f + k.texAvg[a] * 0.2f : k.texAvg[a]; g_liveTexSet = true; } }   // Studio shows captured surfaces textured while scanning
+    if (rec && !lost && i->frameState == FrameState_Ok && (i->geometryKeyFrame || (g_frames.load() % 2 == 0))) { FrameMesh k = m; k.col.clear(); if (f->isTextured()) { grabTexture(f, k); if (!k.uv.empty()) { for (int a = 0; a < 3; a++) g_liveTexAvg[a] = g_liveTexSet ? g_liveTexAvg[a] * 0.8f + k.texAvg[a] * 0.2f : k.texAvg[a]; g_liveTexSet = true; } }   // Studio shows captured surfaces textured while scanning
       if (g_liveAcc.size() >= LIVE_ACC_MAX) { std::vector<FrameMesh> half; for (size_t j = 0; j < g_liveAcc.size(); j += 2) half.push_back(std::move(g_liveAcc[j])); g_liveAcc = std::move(half); } g_liveAcc.push_back(std::move(k)); }
     g_live = std::move(m); g_live.noVbo = true; g_newData = true;
   }

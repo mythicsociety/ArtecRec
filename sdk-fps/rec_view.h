@@ -215,12 +215,11 @@ static void render(int w, int h, bool forShot) {
     // only while scanning: after Stop the accumulated frames stay until the next start, and green there left a stale
     // patch over the finished scan (owner, 5 Nov 10:36) — idle draws them the normal way
     bool scanningNow = mode == M_Record || mode == M_Paused || mode == M_Preview;
-    bool liveGreen = scanningNow && S.distColor && !g_liveAcc.empty() && !g_liveAcc.back().col.empty();
-    if (liveGreen) { bool lit = lighting; lighting = false;
-      for (auto& m : g_liveAcc) { glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; drawMesh(m, grey, false, false); }
-      float cur2[3] = {0.30f, 0.80f, 0.32f}; if (lost) { cur2[0] = 0.9f; cur2[1] = 0.2f; cur2[2] = 0.15f; } glPolygonOffset(-0.6f * drawn - 2, -0.6f * drawn - 2);
-      if (!g_live.v.empty()) { FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur2, false, false); keep.swap(m.col); } else drawMesh(m, cur2, false, false); }
-      lighting = lit; glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); }
+    // 5 Nov 10:45 (Madhusudhana's photo): Studio's dense green is the scanner's CURRENT view only, moving with the
+    // scanner; the area already covered shows normally behind it. Accumulating green left a patch where the scanner had
+    // been. So: accumulated frames are drawn the normal way (below), and only the current frame is drawn flat, unlit.
+    if (false) {
+    }
     else {
     bool liveFill = colorMode == 0 && g_liveTexSet;
     if (liveFill) for (auto& m : g_liveAcc) { if (!m.uv.empty()) continue; glPolygonOffset(-0.6f * drawn, -0.6f * drawn); drawn++; drawMesh(m, g_liveTexAvg, false, false, true); }
@@ -228,7 +227,8 @@ static void render(int w, int h, bool forShot) {
     float cur[3] = {0.30f, 0.80f, 0.32f}; if (lost) { cur[0] = 0.9f; cur[1] = 0.2f; cur[2] = 0.15f; }
     glPolygonOffset(-0.6f * drawn - 2, -0.6f * drawn - 2);
     // the current frame only while scanning: after Stop it stayed on screen as a green patch (owner, 5 Nov 10:42)
-    if (scanningNow && !g_live.v.empty()) { FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur, false, false); keep.swap(m.col); } else drawMesh(m, cur, false, false); }
+    if (scanningNow && !g_live.v.empty()) { bool lit = lighting; lighting = false;   // flat, unlit: the dense green of Studio's live view
+      FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur, false, false); keep.swap(m.col); } else drawMesh(m, cur, false, false); lighting = lit; }
     glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); } }
   drawRotCentre(); deleteTrashTextures();
   if (forShot) return;
