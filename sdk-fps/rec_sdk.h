@@ -833,8 +833,15 @@ static void runAutoAlign() {   // aligns the visible scans to each other (Studio
     ErrorCode ec = ErrorCode_OK; double secs = 0; IModel* out = nullptr; createModel(&out);
     if (in->getSize() >= 2) {
       alg::AutoAlignSettings as; as.scannerType = in->getElement(0)->getScannerType(); alg::IAlgorithm* a = nullptr; ec = alg::createAutoalignAlgorithm(&a, &as);
-      auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = executeJob(a, &ws); a->release(); }
+      // 5 Nov 14:26: auto-align of a 297-frame pass ran 6+ minutes (normally 2–15 s) with the buttons locked, until the
+      // team killed ArtecRec. Give it 60 s, then cancel through the job's cancellation token.
+      bool gaveUp = false;
+      auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency();
+        ICancellationTokenSource* acts = nullptr; createCancellationTokenSource(&acts); if (acts) ws.cancellation = acts->getToken();
+        std::atomic<bool> fin{false}; std::thread wd([&] { for (int i = 0; i < 600 && !fin.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(100)); if (!fin.load() && acts) { gaveUp = true; acts->cancel(); logf("auto-align: no result in 60 s, cancelled"); } });
+        ec = executeJob(a, &ws); fin = true; wd.join(); if (acts) acts->release(); a->release(); }
       secs = std::chrono::duration<double>(clk::now() - t0).count();
+      if (gaveUp && ec == ErrorCode_OK) ec = ErrorCode_OperationAborted;
       int moved = 0;
       // 4 Nov 16:57: the SDK moved scan 6, which the live search had placed and the refinement had tightened to 0.24 mm,
       // by 24 cm. Scans already placed are anchors: their returned transforms are not applied; an unplaced scan's
@@ -854,7 +861,7 @@ static void runAutoAlign() {   // aligns the visible scans to each other (Studio
       if (ec == ErrorCode_OK && map.size() >= 2 && moved == 0) ec = ErrorCode_OperationFailed;
     }
     out->release(); in->release();
-    wchar_t m[80]; if (ec == ErrorCode_OK) swprintf(m, 80, L"aligned in %.0f s", secs); else if (ec == ErrorCode_OperationFailed) wcscpy(m, L"could not align the new scan (too little overlap)"); else swprintf(m, 80, L"align failed (0x%08X)", (unsigned)ec); g_alignMsg = m; PostMessageW(g_hwnd, WM_ALIGNDONE, 0, 0);
+    wchar_t m[80]; if (ec == ErrorCode_OK) swprintf(m, 80, L"aligned in %.0f s", secs); else if (ec == ErrorCode_OperationFailed) wcscpy(m, L"could not align the new scan (too little overlap)"); else if (ec == ErrorCode_OperationAborted) wcscpy(m, L"auto-align gave up after 60 s (too little overlap?)"); else swprintf(m, 80, L"align failed (0x%08X)", (unsigned)ec); g_alignMsg = m; PostMessageW(g_hwnd, WM_ALIGNDONE, 0, 0);
   });
 }
 static void onAlignDone() { if (g_alignThread.joinable()) g_alignThread.join(); rebuildMaster(); g_mode = M_Idle; }
