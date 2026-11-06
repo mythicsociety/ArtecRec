@@ -211,7 +211,8 @@ TEST(sys_save_into_folder_with_photos, "A1 FINDING-on-old-build") {
   CHECK(alive()); NOTE((line.empty() ? std::string("no save line") : line) + (boxes.empty() ? "" : "; message: " + narrow(boxes)));
   CHECK_MSG(exists(b + L"\\IMG_0412.JPG"), "the photo in the chosen folder was DELETED by the save (A1)");
   CHECK_MSG(exists(b + L"\\Halebidu\\notes.txt"), "the other project in the chosen folder was DELETED by the save (A1)");
-  bool savedSafely = exists(b + L"\\Belur\\Belur.sproj") || !boxes.empty() || has(line, "refused"); CHECK_MSG(savedSafely, "neither saved to Belur\\Belur nor told the user why not");
+  bool refusedWithMessage = has(line, "save refused") || boxes.find(L"will not replace it") != std::wstring::npos;   // DeepSeek 3-3: the specific refusal, not any message box
+  bool savedSafely = exists(b + L"\\Belur\\Belur.sproj") || refusedWithMessage; CHECK_MSG(savedSafely, "neither saved to Belur\\Belur nor refused with the folder-protection message");
   if (has(line, "refused") && boxes.empty()) NOTE("refused in the log, but no message box was seen by the driver");
 }
 TEST(sys_exit_after_save, "B6 A4") {
@@ -221,7 +222,7 @@ TEST(sys_exit_after_save, "B6 A4") {
 }
 TEST(sys_log_failure_signatures, "B1 B3 A1") {
   std::string l = logText(); if (l.empty()) SKIP("no log");
-  for (const char* sig : {"could not move the old project folder", "could not move the new project folder", "no result in", "Stop did not finish", "abandoned", "createSaver 0x", "createNewProject 0x"}) CHECK_MSG(!has(l, sig), std::string("log contains: ") + lineWith(l, sig));
+  for (const char* sig : {"could not move the old project folder", "could not move the new project folder", "Stop did not finish", "the scanning job did not end", "auto-align did not end in 90 s", "did not finish in 6 min", "createSaver 0x", "createNewProject 0x"}) CHECK_MSG(!has(l, sig), std::string("log contains: ") + lineWith(l, sig));
   NOTE("log: " + narrow(LOG()) + " (" + std::to_string(countOf(l, "\n")) + " lines)");
 }
 TEST(sys_cleanup, "setup") { killApp(); NOTE("left for inspection: " + narrow(SYS()) + " (delete by hand)"); }

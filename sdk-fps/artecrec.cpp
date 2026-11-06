@@ -106,7 +106,7 @@ static void updateStatus() {
   static wchar_t busy[96]; if (m == M_Busy && !g_busyText.empty()) { if (g_busyPct.load() >= 0) swprintf(busy, 96, L"%s %d%%", g_busyText.c_str(), g_busyPct.load()); else swprintf(busy, 96, L"%s", g_busyText.c_str()); ms = busy; }
   double secs = g_recSecs + (m == M_Record ? std::chrono::duration<double>(clk::now() - g_recStart).count() : 0); wchar_t b[512]; double fps = fpsNow();
   long shown = g_alignLive.load() ? (g_liveFound.load() ? g_frames.load() - g_foundAt.load() : 0) : g_frames.load();
-  if (m == M_Record && g_alignLive.load() && !g_liveFound.load()) ms = L"Searching for position…"; if (m == M_Record && g_lostNow.load()) ms = S.scanUsingAutoAlign ? L"Searching for position…" : L"Tracking lost";
+  if (m == M_Record && g_alignLive.load() && !g_liveFound.load()) ms = g_searchZombie.load() ? L"Live joining paused (restart ArtecRec); recording continues" : L"Searching for position…";   // DeepSeek 3-4 if (m == M_Record && g_lostNow.load()) ms = S.scanUsingAutoAlign ? L"Searching for position…" : L"Tracking lost";
   if (g_pendingSave && m == M_Idle) ms = L"Will save when the scans are processed...";
   swprintf(b, 512, L"%.1f fps\r\n\r\nSurfaces recorded: %ld\r\nRecording time: %d:%02d\r\nRegistration failures: %ld   %s\r\n\r\n%s\r\n%s", (m == M_Idle) ? 0.0 : fps, shown, (int)secs / 60, (int)secs % 60, g_regFail.load(), g_alignMsg.get().c_str(), ms, nt.c_str());
   panel::setStatus(b); panel::enableForMode(m);

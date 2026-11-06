@@ -366,7 +366,7 @@ static void prepareRecording(bool recording) {
 }
 // Review B1 (second pass): the UI never joins the search without a bound. Stop it, wait up to 10 s, then let it go.
 static void joinSearchBounded() { g_searchStop = true; for (int i = 0; i < 200 && g_searchBusy.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  if (g_searchThread.joinable()) { if (g_searchBusy.load()) { logf("the position search did not stop in 10 s: left to finish on its own (its result is ignored)"); ++g_searchGen; g_searchZombie = true; g_searchThread.detach(); } else g_searchThread.join(); } g_searchBusy = false; }
+  if (g_searchThread.joinable()) { if (g_searchBusy.load()) { logf("the position search did not stop in 10 s: left to finish on its own (its result is ignored)"); ++g_searchGen; g_searchZombie = true; g_searchThread.detach(); notice(L"The position search is taking too long to stop. Live joining is paused until ArtecRec is restarted; recording, auto-align after Stop and saving still work."); } else g_searchThread.join(); } g_searchBusy = false; }   // DeepSeek 3-4
 // Review C6: one live-search result per recorded segment (Pause/Resume makes one scan per segment).
 static std::vector<logic::SegmentPose> g_segPoses;
 static void pushSegmentPose() { logic::SegmentPose p; p.found = g_alignLive.load() && g_liveFound.load(); { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(p.T, g_liveT, sizeof p.T); } g_segPoses.push_back(p); }
@@ -1016,7 +1016,8 @@ static bool writeStudioNames(const std::wstring& sproj) {
 // Long SDK jobs (save: 287 s for a 4.9 GB project on 2 Nov; open) run in a worker thread while the UI thread pumps
 // messages, so the window keeps drawing and shows progress, as Studio does. Input is guarded by g_mode == M_Busy.
 static std::atomic<int> g_busyPct{-1}; static std::wstring g_busyText;
-struct Prog : public ProgressInfoBase { void report(int current, int total) override { g_busyPct = total > 0 ? (int)((long long)current * 100 / total) : -1; } void pulse() override {} void notify(DetailsInfo) override {} };
+struct Prog : public ProgressInfoBase { std::atomic<bool> abandoned{false};   // DeepSeek 3-1: a job given up on stops reporting
+  void report(int current, int total) override { if (abandoned.load()) return; g_busyPct = total > 0 ? (int)((long long)current * 100 / total) : -1; } void pulse() override {} void notify(DetailsInfo) override {} };
 // Round 2 (R2-01): a save or open whose SDK job does not return is no longer a dead end. After `askAfterSecs` the user is
 // asked whether to keep waiting; giving up detaches the job (it holds its own references to the job and models, and
 // writes only into its own folder) and returns ErrorCode_OperationAborted. The scans stay in memory.
@@ -1030,7 +1031,7 @@ static ErrorCode runJobPumped(IJob* job, AlgorithmWorkset* ws, const wchar_t* wh
     if (std::chrono::duration<double>(clk::now() - t0).count() > askAfterSecs) {
       wchar_t q[400]; swprintf(q, 400, L"%s has been running for %d minutes without finishing.\n\nKeep waiting?\n\nYes = wait %d more minutes.\nNo = give up. Your scans stay in ArtecRec; save them again, if possible to another folder or drive.", what, (int)(std::chrono::duration<double>(clk::now() - t0).count() / 60), askAfterSecs / 60);
       if (MessageBoxW(g_hwnd, q, L"ArtecRec", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1) == IDYES) t0 = clk::now(); else if (!st->done.load()) { abandoned = true; break; } } }
-  if (abandoned) { logf("%ls: no result after the time limit; given up by the user (job left to finish on its own)", what); t.detach(); } else t.join();
+  if (abandoned) { prog->abandoned = true; logf("%ls: no result after the time limit; given up by the user (job left to finish on its own)", what); t.detach(); } else t.join();
   ws->progress = nullptr; prog->release(); g_busyText.clear(); g_busyPct = -1; if (sawQuit) PostQuitMessage(quitCode); return abandoned ? ErrorCode_OperationAborted : st->ec;
 }
 static bool removeDir(const std::wstring& dir) { std::wstring dz = dir; dz.push_back(L'\0'); SHFILEOPSTRUCTW op = {}; op.wFunc = FO_DELETE; op.pFrom = dz.c_str(); op.fFlags = FOF_NO_UI; return SHFileOperationW(&op) == 0; }
