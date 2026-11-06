@@ -555,8 +555,11 @@ static void runPositionSearch() {
   if (g_searchBusy.exchange(true)) return; if (g_searchThread.joinable()) g_searchThread.join();
   int gen = ++g_searchGen; g_searchThread = std::thread([gen] {
     if (g_localResume) { std::vector<HybridWindow> wins = hybridWindows(); bool texReady = false; Matrix4x4D Fin; { std::lock_guard<std::mutex> l(g_tempMx); texReady = g_tempTex && g_tempTex->getSize() >= 3; if (texReady) Fin = g_tempTex->getTransformation(g_tempTex->getSize() - 1); }
-      if (texReady && !wins.empty()) { int latest = wins[0].scan; int tried = 0;
-        for (size_t a = 0; a < wins.size() && tried < 3; a++) { const HybridWindow& win = wins[a]; if (win.scan != latest) break; tried++;
+      // outside review 6 Nov / Trail21: rotate over the 3 most recent visible passes, newest first (logic::searchTarget)
+      std::vector<int> cand; { std::lock_guard<std::mutex> l(g_scanMx); for (int i = (int)g_scans.size() - 1; i >= 0; i--) { auto& s = g_scans[i]; if (s.visible && s.scan && s.ref && s.scan->getSize() >= 10 && (s.group < 0 || (s.group < (int)g_groups.size() && g_groups[s.group].visible)) && !isCleaning(s.scan)) cand.push_back(i); } }
+      int target = logic::searchTarget(cand, g_hybridNext.load()); g_hybridNext++;
+      if (texReady && !wins.empty() && target >= 0) { int latest = target; int tried = 0;
+        for (size_t a = 0; a < wins.size() && tried < 3; a++) { const HybridWindow& win = wins[a]; if (win.scan != latest) continue; tried++;
           double T[4][4]; int nr = 0, np = 0; double secs = 0; if (!hybridResume(win, T, nr, np, secs)) continue;
           // gate: where does this put the latest probe frame, and where is the tail of the previous pass?
           double pw[3] = {T[0][0] * Fin.m[0][3] + T[0][1] * Fin.m[1][3] + T[0][2] * Fin.m[2][3] + T[0][3], T[1][0] * Fin.m[0][3] + T[1][1] * Fin.m[1][3] + T[1][2] * Fin.m[2][3] + T[1][3], T[2][0] * Fin.m[0][3] + T[2][1] * Fin.m[1][3] + T[2][2] * Fin.m[2][3] + T[2][3]};
@@ -575,23 +578,23 @@ static void runPositionSearch() {
           logf("position search #%d (local resume, scan %d window %zu): FOUND in %.1f s, ref frames %d, probe frames %d, surface %.0f%% within 6 mm median %.1f mm (cameras %.0f mm apart)", ++g_searchTries, win.scan + 1, a + 1, secs, nr, np, share * 100, med, dist);
           if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
           g_hybridNext = 0; g_lastSearch = clk::now(); searchDone(gen); return; }
-        if (tried) logf("position search #%d (local resume): texture join not found; trying the geometry auto-align against the previous pass", g_searchTries + 1); }
+        if (tried) logf("position search #%d (local resume, pass %d): texture join not found; trying the geometry auto-align against that pass", g_searchTries + 1, latest + 1); }
       // geometry auto-align (the method that joined Trail13 after Stop) against the latest visible pass only, then the same surface gate on its tail windows
       IScan* probe = nullptr; { std::lock_guard<std::mutex> l(g_tempMx); if (g_tempScan) { createSimilarScan(&probe, g_tempScan); if (probe) cloneScan(probe, g_tempScan); } }
       if (!probe || probe->getSize() < 6) { if (probe) probe->release(); g_lastSearch = clk::now(); searchDone(gen); return; } ensureNormals(probe);
-      IModel* in = nullptr; createModel(&in); { std::lock_guard<std::mutex> l(g_scanMx); for (int i = (int)g_scans.size() - 1; i >= 0; i--) { auto& s = g_scans[i]; if (!(s.visible && s.scan && s.ref && (s.group < 0 || g_groups[s.group].visible))) continue; s.ref->setScanTransformation(s.scan->getScanTransformation()); in->add(s.ref); break; } }
+      IModel* in = nullptr; createModel(&in); { std::lock_guard<std::mutex> l(g_scanMx); if (target >= 0 && target < (int)g_scans.size() && g_scans[target].scan && g_scans[target].ref) { auto& s = g_scans[target]; s.ref->setScanTransformation(s.scan->getScanTransformation()); in->add(s.ref); } }
       int nref = in->getSize(); if (nref == 0) { in->release(); probe->release(); g_lastSearch = clk::now(); searchDone(gen); return; } in->add(probe);
       IModel* out = nullptr; createModel(&out); alg::AutoAlignSettings as; as.scannerType = probe->getScannerType(); alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createAutoalignAlgorithm(&a, &as);
       auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(a, &ws, 20, "position search", &g_searchStop); a->release(); }
       bool found = false; double T[4][4];
       if (ec == ErrorCode_OK && out->getSize() == 2) { double Rin[4][4], Rout[4][4], Pout[4][4], Rinv[4][4], tmp[4][4]; memcpy(Rin, in->getElement(0)->getScanTransformation().m, sizeof Rin); memcpy(Rout, out->getElement(0)->getScanTransformation().m, sizeof Rout); memcpy(Pout, out->getElement(1)->getScanTransformation().m, sizeof Pout);
-        invRigid(Rout, Rinv); mul44(Rinv, Rin, tmp); mul44(tmp, Pout, T); found = !isIdentity(out->getElement(0)->getScanTransformation().m) || !isIdentity(out->getElement(1)->getScanTransformation().m); }
+        (void)Rinv; (void)tmp; logic::livePose(Rin, Rout, Pout, T); found = !isIdentity(out->getElement(0)->getScanTransformation().m) || !isIdentity(out->getElement(1)->getScanTransformation().m); }   /* outside review 6 Nov: Rin * inv(Rout) * Pout */
       double secs = std::chrono::duration<double>(clk::now() - t0).count(); float share = 0, med = 99, flat = 0;
-      if (found && !wins.empty()) { std::vector<float> wpts, ppts; { std::lock_guard<std::mutex> l(g_scanMx); int latest = wins[0].scan; if (latest < (int)g_scans.size() && g_scans[latest].scan) { IScan* ws = g_scans[latest].scan; const auto& ST = ws->getScanTransformation().m; int tw = 0; for (auto& win : wins) { if (win.scan != latest || tw++ >= 3) break; for (int k : win.frames) { if (k >= ws->getSize()) continue; double M[4][4]; mul44(ST, ws->getTransformation(k).m, M); framePointsT(ws->getElement(k), M, 10, wpts); } } } }
+      if (found && target >= 0) { std::vector<float> wpts, ppts; { std::lock_guard<std::mutex> l(g_scanMx); if (target < (int)g_scans.size() && g_scans[target].scan && g_scans[target].ref) { IScan* rs = g_scans[target].ref; Matrix4x4D STm = g_scans[target].scan->getScanTransformation(); for (int k = 0; k < rs->getSize(); k++) { double M[4][4]; mul44(STm.m, rs->getTransformation(k).m, M); framePointsT(rs->getElement(k), M, 10, wpts); } } }   // the whole pass (its 40-frame reference): the geometry search places a pass anywhere on it; the 1.0 mm median and flatness rules guard against slides
         for (int j = std::max(0, probe->getSize() - 3); j < probe->getSize(); j++) { double M[4][4]; mul44(T, probe->getTransformation(j).m, M); framePointsT(probe->getElement(j), M, 25, ppts); }
         if (wpts.size() >= 300 && ppts.size() >= 60) { flat = logic::planeRms(wpts); feat::Grid g; g.build(std::move(wpts), 2.0f); double I[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, z[3] = {0, 0, 0}; g.check(ppts, I, z, 6.0f, share, med); } }
       logic::GateResult gate = logic::acceptJoin(share, med, true, flat); bool ok = found && gate.ok;   // review D1: geometry-only placement refused on a near-flat window
-      logf("position search #%d (local geometry auto-align vs the previous pass): 0x%08X in %.1f s, probe frames %d -> %s (surface %.0f%% within 6 mm, median %.1f mm, window flatness %.1f mm)", ++g_searchTries, (unsigned)ec, secs, probe->getSize(), ok ? "FOUND" : found ? gate.why : "not found", share * 100, med, flat);
+      logf("position search #%d (local geometry auto-align vs pass %d): 0x%08X in %.1f s, probe frames %d -> %s (surface %.0f%% within 6 mm, median %.1f mm, window flatness %.1f mm)", ++g_searchTries, target + 1, (unsigned)ec, secs, probe->getSize(), ok ? "FOUND" : found ? gate.why : "not found", share * 100, med, flat);
       if (ok) { if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
       out->release(); in->release(); probe->release(); g_lastSearch = clk::now(); searchDone(gen); return; }
     // 0) image-feature search (FS build): recognise the place the latest textured probe frame shows in any earlier pass
@@ -632,7 +635,7 @@ static void runPositionSearch() {
       // The SDK may anchor on any scan: express the probe's pose relative to the first reference's ORIGINAL pose,
       // T = inv(ref0_out) * ref0_in * probe_out (3 Nov: it had moved the reference and the probe looked "identity").
       double Rin[4][4], Rout[4][4], Pout[4][4], Rinv[4][4], tmp[4][4]; memcpy(Rin, in->getElement(0)->getScanTransformation().m, sizeof Rin); memcpy(Rout, out->getElement(0)->getScanTransformation().m, sizeof Rout); memcpy(Pout, out->getElement(nref)->getScanTransformation().m, sizeof Pout);
-      invRigid(Rout, Rinv); mul44(Rinv, Rin, tmp); mul44(tmp, Pout, T); bool anyMoved = false; for (int k = 0; k <= nref; k++) if (!isIdentity(out->getElement(k)->getScanTransformation().m)) anyMoved = true; found = anyMoved; }
+      (void)Rinv; (void)tmp; logic::livePose(Rin, Rout, Pout, T); bool anyMoved = false; for (int k = 0; k <= nref; k++) if (!isIdentity(out->getElement(k)->getScanTransformation().m)) anyMoved = true; found = anyMoved; }
     logf("position search #%d (%s): 0x%08X in %.1f s, probe frames %d, refs %d -> %s", ++g_searchTries, tier == 1 ? "recent scans" : tier == 2 ? "all scans" : "all scans, 120-frame references", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), probe->getSize(), nref, found ? "FOUND" : "not found");
     for (IScan* t : big) t->release();
     if (found) { if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
@@ -981,11 +984,11 @@ static bool writeFileAtomic(const std::wstring& path, const std::string& bytes) 
   if (!ok) { DeleteFileW(tmp.c_str()); return false; } return MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0; }
 // Sidecar: groups are not part of the .sproj format. Review D4: "placed" (already joined) is saved; D5: each scan line
 // carries its frame count so a reopened project only takes a line that matches its scan.
-static void saveGroups(const std::wstring& sproj) {
+static bool saveGroups(const std::wstring& sproj) {
   std::wstring w; wchar_t b[1200];
   for (auto& g : g_groups) { swprintf(b, 1200, L"G\t%s\t%d\n", g.name.c_str(), g.visible ? 1 : 0); w += b; }
   int i = 0; for (auto& sc : g_scans) { swprintf(b, 1200, L"S\t%d\t%s\t%d\t%d\t%d\t%.4f\t%d\t%d\n", i++, sc.name.c_str(), sc.group, sc.visible ? 1 : 0, sc.keyFrames, sc.maxErr, sc.placed ? 1 : 0, sc.scan ? sc.scan->getSize() : 0); w += b; }
-  if (!writeFileAtomic(projDir(sproj) + L"\\artecrec-groups.txt", "\xEF\xBB\xBF" + logic::utf8(w))) logf("groups file could not be written");
+  if (!writeFileAtomic(projDir(sproj) + L"\\artecrec-groups.txt", "\xEF\xBB\xBF" + logic::utf8(w))) { logf("groups file could not be written"); return false; } return true;
 }
 static void loadGroups(const std::wstring& sproj) {
   FILE* f = _wfopen((projDir(sproj) + L"\\artecrec-groups.txt").c_str(), L"r, ccs=UTF-8"); if (!f) return; wchar_t line[1024]; g_groups.clear(); int skipped = 0;
@@ -1058,7 +1061,7 @@ static bool saveProject(const std::wstring& sproj) {
       logf("could not move the new project folder in (error %lu); old folder %s", e, back ? "restored" : "NOT restored"); return false; }
     if (hadPrev) removeDir(older); }
   writeFileAtomic(dir + L"\\artecrec-project.txt", "Saved by ArtecRec. This folder holds one project; ArtecRec may replace it when the project is saved again.\r\n");
-  saveGroups(sproj); if (!writeStudioNames(sproj)) notice(L"Saved. The scan names could not all be written for Artec Studio; Studio will show its own names (the scans are fine)."); g_dirty = false; g_projPath = sproj; g_projForeign = false; g_replaceOk.clear(); return true;
+  if (!saveGroups(sproj)) notice(L"Saved. The ArtecRec names and groups could not be written (the scans are fine; names and groups will be lost on reopening)."); else if (!writeStudioNames(sproj)) notice(L"Saved. The scan names could not all be written for Artec Studio; Studio will show its own names (the scans are fine)."); g_dirty = false; g_projPath = sproj; g_projForeign = false; g_replaceOk.clear(); return true;
 }
 static void clearProject() { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); g_projForeign = false; }
 // Review F5/A2/D4: the current project is cleared only after the new one loaded with at least one scan; a Studio project

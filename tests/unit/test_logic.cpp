@@ -359,4 +359,38 @@ TEST(mem_levels, "E1") {
   CHECK_EQ(memLevel(0), Mem_Refuse); CHECK_EQ(memLevel(5.99), Mem_Refuse); CHECK_EQ(memLevel(6), Mem_Warn); CHECK_EQ(memLevel(15.99), Mem_Warn); CHECK_EQ(memLevel(16), Mem_Ok); CHECK_EQ(memLevel(64), Mem_Ok); CHECK_EQ(memLevel(-1), Mem_Refuse);
 }
 
+// ================================================================= live pose composition (outside review, 6 Nov)
+static void rigid(double ax, double ay, double az, double ang, double tx, double ty, double tz, double M[4][4]) {
+  double n = sqrt(ax * ax + ay * ay + az * az); ax /= n; ay /= n; az /= n; double c = cos(ang), s = sin(ang), t = 1 - c;
+  double R[3][3] = {{t * ax * ax + c, t * ax * ay - s * az, t * ax * az + s * ay}, {t * ax * ay + s * az, t * ay * ay + c, t * ay * az - s * ax}, {t * ax * az - s * ay, t * ay * az + s * ax, t * az * az + c}};
+  for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) M[i][j] = R[i][j]; } M[0][3] = tx; M[1][3] = ty; M[2][3] = tz; M[3][0] = M[3][1] = M[3][2] = 0; M[3][3] = 1; }
+static double maxDiff(const double A[4][4], const double B[4][4]) { double d = 0; for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) d = std::max(d, fabs(A[i][j] - B[i][j])); return d; }
+TEST(live_pose_keeps_reference_fixed_rotated_reference, "D1 outside-review") {
+  // The SDK may move the reference too. Whatever rigid motion G it applies to both (Rout = G*Rin, Pout = G*P), the probe's
+  // placement relative to the unmoved reference must be P: T = Rin*inv(Rout)*Pout = P. The old order inv(Rout)*Rin*Pout
+  // gives P only when G commutes with Rin.
+  std::mt19937 rng(7); std::uniform_real_distribution<double> U(-1, 1); int bad = 0; double worstOld = 0;
+  for (int it = 0; it < 200; it++) {
+    double Rin[4][4], P[4][4], G[4][4], Rout[4][4], Pout[4][4], T[4][4];
+    rigid(U(rng), U(rng), U(rng) + 2, U(rng) * 2, U(rng) * 400, U(rng) * 400, U(rng) * 400, Rin);   // a rotated, shifted reference
+    rigid(U(rng), U(rng) + 2, U(rng), U(rng), U(rng) * 300, U(rng) * 300, U(rng) * 300, P);
+    rigid(U(rng) + 2, U(rng), U(rng), U(rng), U(rng) * 200, U(rng) * 200, U(rng) * 200, G);
+    mul4(G, Rin, Rout); mul4(G, P, Pout);
+    livePose(Rin, Rout, Pout, T); if (maxDiff(T, P) > 1e-6) bad++;
+    double inv[4][4], tmp[4][4], Old[4][4]; invRigid4(Rout, inv); mul4(inv, Rin, tmp); mul4(tmp, Pout, Old); worstOld = std::max(worstOld, maxDiff(Old, P)); }
+  CHECK_EQ(bad, 0);
+  NOTE("old order inv(Rout)*Rin*Pout: worst error over 200 random cases " + std::to_string(worstOld) + " (matrix units, mm in the translation)");
+  CHECK(worstOld > 1.0);   // the regression this guards: the old order is really wrong when the reference moves
+}
+TEST(live_pose_reference_unmoved_equals_probe_pose, "D1") {
+  double Rin[4][4], P[4][4], T[4][4]; rigid(0.3, 0.2, 1, 0.7, 120, -40, 300, Rin); rigid(1, 0, 0.2, -0.4, 10, 20, 30, P);
+  livePose(Rin, Rin, P, T); CHECK(maxDiff(T, P) < 1e-9);
+}
+// ================================================================= search target rotation (Trail21, 5 Nov evening)
+TEST(search_target_rotates_over_three_newest, "D1 Trail21") {
+  std::vector<int> c = {6, 5, 3, 1};   // newest first
+  CHECK_EQ(searchTarget(c, 0), 6); CHECK_EQ(searchTarget(c, 1), 5); CHECK_EQ(searchTarget(c, 2), 3); CHECK_EQ(searchTarget(c, 3), 6); CHECK_EQ(searchTarget(c, 4), 5);
+  CHECK_EQ(searchTarget({}, 0), -1); CHECK_EQ(searchTarget({2}, 5), 2); CHECK_EQ(searchTarget({4, 2}, 3), 2); CHECK_EQ(searchTarget(c, -3), 6);
+}
+
 int main(int argc, char** argv) { return tfw::run(argc, argv, "unit-logic"); }

@@ -169,6 +169,22 @@ inline void clampRange(int& nearMm, int& farMm) {
 enum MemLevel { Mem_Ok, Mem_Warn, Mem_Refuse };
 inline MemLevel memLevel(double freeGB) { return freeGB < 6 ? Mem_Refuse : freeGB < 16 ? Mem_Warn : Mem_Ok; }
 
+// ---------------------------------------------------------------- live pose from an auto-align result
+// The search aligns [reference scan with pose Rin, probe] and the SDK returns new poses Rout (reference) and Pout (probe).
+// The reference must stay where it is, so the correction C = Rin * inv(Rout) (C * Rout = Rin) is applied to the probe:
+// T = Rin * inv(Rout) * Pout. (Outside review 6 Nov: the code had inv(Rout) * Rin * Pout, which is the same only when
+// the SDK leaves the reference unmoved.) Rigid 4x4, row-major, column vectors.
+inline void mul4(const double A[4][4], const double B[4][4], double O[4][4]) { for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) { double t = 0; for (int k = 0; k < 4; k++) t += A[i][k] * B[k][j]; O[i][j] = t; } }
+inline void invRigid4(const double M[4][4], double O[4][4]) { for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) O[i][j] = M[j][i]; for (int i = 0; i < 3; i++) O[i][3] = -(O[i][0] * M[0][3] + O[i][1] * M[1][3] + O[i][2] * M[2][3]); O[3][0] = O[3][1] = O[3][2] = 0; O[3][3] = 1; }
+inline void livePose(const double Rin[4][4], const double Rout[4][4], const double Pout[4][4], double T[4][4]) { double inv[4][4], C[4][4]; invRigid4(Rout, inv); mul4(Rin, inv, C); mul4(C, Pout, T); }
+
+// ---------------------------------------------------------------- which earlier pass the live search compares with
+// Trail21 (5 Nov evening): a tracking loss left a 48-frame scrap as the newest pass, and every search compared the new
+// pass with that scrap only, so a pass started over the earlier, larger passes was never found. The search now rotates
+// over the most recent visible passes (newest first). candidates: indexes of visible passes with a search reference,
+// newest first; try: the search attempt number since the pass started (0 = first).
+inline int searchTarget(const std::vector<int>& candidates, int tryNo) { if (candidates.empty()) return -1; int n = (int)std::min<size_t>(candidates.size(), 3); return candidates[(tryNo < 0 ? 0 : tryNo) % n]; }
+
 // ---------------------------------------------------------------- pause/resume segments (C6)
 // One entry per recorded segment, in the order the SDK returns the scans.
 struct SegmentPose { bool found; double T[4][4]; };
