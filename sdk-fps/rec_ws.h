@@ -37,7 +37,7 @@ static void showProps() {
   else { auto& s = g_scans[i]; swprintf(b, 1024, L"%s\r\n\r\nType: Scan   Scanner: Artec Space Spider\r\nFrames: %d\r\nTexture frames: %d\r\nKey frames: %d\r\nMax registration error: %.3f mm\r\nGroup: %s\r\nShown: %s", s.name.c_str(), s.frames, s.texFrames, s.keyFrames, s.maxErr, s.group >= 0 ? g_groups[s.group].name.c_str() : L"—", s.visible ? L"yes" : L"no"); }
   SetWindowTextW(props, b);
 }
-static void layout() { RECT r; GetClientRect(hwnd, &r); MoveWindow(title, 10, 8, r.right - 20, 22, TRUE); int ph = 190; MoveWindow(list, 6, 34, r.right - 12, r.bottom - 34 - ph - 10, TRUE); MoveWindow(ptitle, 10, r.bottom - ph, r.right - 20, 22, TRUE); MoveWindow(props, 10, r.bottom - ph + 26, r.right - 20, ph - 30, TRUE); }
+static void layout() { RECT r; GetClientRect(hwnd, &r); int m = uik(10), top = uik(8), th = uik(22), lx = uik(6), ly = uik(34), ph = uik(190); MoveWindow(title, m, top, r.right - 2 * m, th, TRUE); MoveWindow(list, lx, ly, r.right - 2 * lx, r.bottom - ly - ph - m, TRUE); MoveWindow(ptitle, m, r.bottom - ph, r.right - 2 * m, th, TRUE); MoveWindow(props, m, r.bottom - ph + uik(26), r.right - 2 * m, ph - uik(30), TRUE); }
 static void changed() { rebuildMaster(); g_dirty = true; refresh(); showProps(); if (onChanged) onChanged(); }
 
 static void syncVisibleFromList() {   // read every eye tick into the model
@@ -123,7 +123,7 @@ static void create(HWND parent, HFONT f, HFONT fb) {
   list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_EDITLABELS, 0, 0, 10, 10, hwnd, nullptr, wc.hInstance, nullptr);
   ListView_SetExtendedListViewStyle(list, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP); SendMessageW(list, WM_SETFONT, (WPARAM)f, TRUE);
   const wchar_t* cols[] = {L"Name", L"Color", L"Type", L"Error", L"Frames", L"Scanner", L"Texture frames"}; int widths[] = {150, 44, 50, 52, 56, 60, 60};
-  for (int i = 0; i < 7; i++) { LVCOLUMNW c = {LVCF_TEXT | LVCF_WIDTH}; c.pszText = (LPWSTR)cols[i]; c.cx = widths[i]; ListView_InsertColumn(list, i, &c); }
+  for (int i = 0; i < 7; i++) { LVCOLUMNW c = {LVCF_TEXT | LVCF_WIDTH}; c.pszText = (LPWSTR)cols[i]; c.cx = uik(widths[i]); ListView_InsertColumn(list, i, &c); }
   ptitle = CreateWindowW(L"STATIC", L"Properties", WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, hwnd, nullptr, wc.hInstance, nullptr); SendMessageW(ptitle, WM_SETFONT, (WPARAM)fb, TRUE);
   props = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10, hwnd, nullptr, wc.hInstance, nullptr); SendMessageW(props, WM_SETFONT, (WPARAM)f, TRUE);
   showProps();

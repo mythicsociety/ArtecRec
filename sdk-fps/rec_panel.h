@@ -12,12 +12,12 @@ static HFONT font, fontB, fontSmall;
 
 static HWND mk(const wchar_t* cls, const wchar_t* text, DWORD style, HFONT f = nullptr) { HWND h = CreateWindowW(cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, hwnd, nullptr, GetModuleHandle(nullptr), nullptr); SendMessageW(h, WM_SETFONT, (WPARAM)(f ? f : font), TRUE); return h; }
 static HWND slider(int lo, int hi, int pos) { HWND s = mk(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP); SendMessageW(s, TBM_SETRANGE, TRUE, MAKELPARAM(lo, hi)); SendMessageW(s, TBM_SETPOS, TRUE, pos); return s; }
-static void place(HWND h, int x, int y, int w, int hh) { MoveWindow(h, x, y - scrollY, w, hh, TRUE); }
+static void place(HWND h, int x, int y, int w, int hh) { MoveWindow(h, uik(x), uik(y) - scrollY, uik(w), uik(hh), TRUE); }   /* design px -> screen px */
 
 static void layout() {
-  RECT r; GetClientRect(hwnd, &r); int W = r.right - (contentH > r.bottom ? 0 : 0), x = 16, cw = W - 32, y = 10;
+  RECT r; GetClientRect(hwnd, &r); int W = (int)(r.right / UI_K), x = 16, cw = W - 32, y = 10;   /* design px */
   place(lTitle, x, y, cw, 22); y += 30;
-  place(lStatus, x, y, cw, 132); y += 140;
+  place(lStatus, x, y, cw, 150); y += 158;
   int bw = (cw - 12) / 3; place(bPreview, x, y, bw, 34); place(bRecord, x + bw + 6, y, bw, 34); place(bStop, x + 2 * (bw + 6), y, bw, 34); y += 48;
   place(lTrack, x, y, cw, 20); y += 22; place(rGeoTex, x, y, cw, 22); y += 24; place(rGeo, x, y, cw, 22); y += 24; place(rTargets, x, y, cw, 22); y += 32;
   place(cDist, x, y, cw, 22); y += 24; place(cAlign, x, y, cw, 22); y += 24; place(cBase, x, y, cw, 22); y += 24; place(cFusion, x, y, cw, 22); y += 24; place(cRtp, x, y, cw, 22); y += 32;
@@ -39,7 +39,7 @@ static void layout() {
     place(lDelay, x, y, 150, 22); place(eDelay, x + 152, y, 44, 22); place(lDelayS, x + 200, y + 2, 60, 20); y += 32;
     place(cLimit, x, y, 190, 22); place(eLimit, x + 192, y, 70, 22); y += 32;
   }
-  contentH = y + 10;
+  contentH = uik(y + 10);
   SCROLLINFO si = {sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, contentH, (UINT)r.bottom, scrollY}; SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
 }
 static void scrollTo(int ny) { RECT r; GetClientRect(hwnd, &r); int maxY = contentH > r.bottom ? contentH - r.bottom : 0; if (ny < 0) ny = 0; if (ny > maxY) ny = maxY; if (ny == scrollY) return; scrollY = ny; layout(); InvalidateRect(hwnd, nullptr, TRUE); }

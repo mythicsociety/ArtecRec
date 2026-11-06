@@ -135,6 +135,10 @@ static void grabTexture(const IFrameMesh* f, FrameMesh& out) {
     if (logged == 1 && getenv("ARTECREC_DEBUG")) { FILE* bf = _wfopen(L"tex-debug.bmp", L"wb"); if (bf) { int rowB = ow * 3, pad = (4 - rowB % 4) % 4; BITMAPFILEHEADER fh = {0x4D42, (DWORD)(54 + (rowB + pad) * oh), 0, 0, 54}; BITMAPINFOHEADER ih = {40, ow, oh, 1, 24, 0, (DWORD)((rowB + pad) * oh)}; fwrite(&fh, 14, 1, bf); fwrite(&ih, 40, 1, bf); unsigned char z[3] = {0, 0, 0};
       for (int y = oh - 1; y >= 0; y--) { for (int x = 0; x < ow; x++) { const unsigned char* o = &out.tex[((size_t)y * ow + x) * 3]; unsigned char b3[3] = {o[2], o[1], o[0]}; fwrite(b3, 3, 1, bf); } if (pad) fwrite(z, pad, 1, bf); } fclose(bf); } } }
 }
+// UI scale (owner, 7 Nov: "the font sizes are too small"). Body text 21 px (about 16 pt), buttons at least 42 px tall,
+// panel rows 28 px: readable at arm's length in daylight. Every layout number in the panels and the 3D-view overlay is a
+// design value that uik() scales, so one constant sets the whole UI.
+static const float UI_K = 1.25f; static int uik(int v) { return (int)(v * UI_K + 0.5f); }
 struct ScanRec {
   IScan* scan = nullptr; std::wstring name; int group = -1; bool visible = true;
   int frames = 0, texFrames = 0, keyFrames = 0; double maxErr = 0; std::vector<FrameMesh> disp; float color[3] = {0.72f, 0.72f, 0.70f}; float texAvg[3] = {0.7f, 0.7f, 0.68f}; bool hasTexAvg = false;

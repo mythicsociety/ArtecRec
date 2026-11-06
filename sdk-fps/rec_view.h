@@ -59,10 +59,10 @@ static void init(HWND h) {
   glEnable(GL_COLOR_MATERIAL); glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE); glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 1);
   pGenBuffers = (PFN_GENBUF)wglGetProcAddress("glGenBuffers"); pBindBuffer = (PFN_BINDBUF)wglGetProcAddress("glBindBuffer"); pBufferData = (PFN_BUFDATA)wglGetProcAddress("glBufferData"); pBufferSubData = (PFN_BUFSUB)wglGetProcAddress("glBufferSubData"); pDeleteBuffers = (PFN_DELBUF)wglGetProcAddress("glDeleteBuffers");
   g_vboOk = pGenBuffers && pBindBuffer && pBufferData && pBufferSubData && pDeleteBuffers; logf("OpenGL: %s, vertex buffers %s", (const char*)glGetString(GL_RENDERER), g_vboOk ? "on" : "unavailable (client arrays)");
-  HFONT f = CreateFontW(15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Segoe UI"); SelectObject(dc, f); fontBase = glGenLists(256); wglUseFontBitmapsW(dc, 0, 255, fontBase);
+  HFONT f = CreateFontW(uik(15), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Segoe UI"); SelectObject(dc, f); fontBase = glGenLists(256); wglUseFontBitmapsW(dc, 0, 255, fontBase);
   // Big fonts for the full-screen scanning bar: the owner reads it from 4–5 feet while holding the scanner (2 Nov).
-  HFONT fm = CreateFontW(30, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Segoe UI"); SelectObject(dc, fm); fontMid = glGenLists(256); wglUseFontBitmapsW(dc, 0, 255, fontMid);
-  HFONT fh = CreateFontW(54, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Segoe UI"); SelectObject(dc, fh); fontBig = glGenLists(256); wglUseFontBitmapsW(dc, 0, 255, fontBig); SelectObject(dc, f);
+  HFONT fm = CreateFontW(uik(30), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Segoe UI"); SelectObject(dc, fm); fontMid = glGenLists(256); wglUseFontBitmapsW(dc, 0, 255, fontMid);
+  HFONT fh = CreateFontW(uik(54), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, L"Segoe UI"); SelectObject(dc, fh); fontBig = glGenLists(256); wglUseFontBitmapsW(dc, 0, 255, fontBig); SelectObject(dc, f);
 }
 static void text(float x, float y, const wchar_t* s) { glRasterPos2f(x, y); glListBase(fontBase); glCallLists((GLsizei)wcslen(s), GL_UNSIGNED_SHORT, s); }
 static void textMid(float x, float y, const wchar_t* s) { glRasterPos2f(x, y); glListBase(fontMid); glCallLists((GLsizei)wcslen(s), GL_UNSIGNED_SHORT, s); }
@@ -162,9 +162,10 @@ static void drawGizmo(int w, int h) {
 static const wchar_t* cubeLabels[6] = {L"Top", L"Front", L"Left", L"Right", L"Back", L"Bottom"}; static const int cubeViews[6] = {4, 0, 2, 3, 1, 5};
 #define WM_VIEWBTN (WM_APP + 7)   // wParam 1 = Record/Pause, 2 = Stop (full-screen scanning overlay)
 static bool fullView = false;      // panels hidden while scanning: show status + Pause/Stop in the viewport
+static float cubeX(int w) { return (float)std::max(w - 440, 84); }   /* the cube strip keeps right of the Fit button on a narrow view */
 static void drawButtons(int w, int h) {   // top-left: fit to view; top-right strip: navigation-cube faces
   glColor4f(0, 0, 0, 0.12f); rect(10, 10, 60, 24); glColor3f(0.05f, 0.05f, 0.05f); text(18, 27, L"Fit  (F)");
-  for (int i = 0; i < 6; i++) { glColor4f(0, 0, 0, 0.12f); rect(w - 440.f + i * 70, 10, 64, 24); glColor3f(0.05f, 0.05f, 0.05f); text(w - 430.f + i * 70, 27, cubeLabels[i]); }
+  for (int i = 0; i < 6; i++) { glColor4f(0, 0, 0, 0.12f); rect(cubeX(w) + i * 70, 10, 64, 24); glColor3f(0.05f, 0.05f, 0.05f); text(cubeX(w) + 10 + i * 70, 27, cubeLabels[i]); }
   if (fullView) { int m = g_mode.load(); double secs = g_recSecs + (m == M_Record ? std::chrono::duration<double>(clk::now() - g_recStart).count() : 0); wchar_t t[160], f[32];
     // Readable from 4–5 feet: 54 px fps, 30 px details, 30 px buttons.
     swprintf(f, 32, L"%.1f fps", fpsNow()); swprintf(t, 160, L"Surfaces: %ld     %d:%02d     Failures: %ld", g_frames.load(), (int)secs / 60, (int)secs % 60, g_regFail.load());
@@ -174,7 +175,7 @@ static void drawButtons(int w, int h) {   // top-left: fit to view; top-right st
     if (st) { glColor4f(0.15f, 0.35f, 0.15f, 0.8f); rect(960, h - 78.f, 330, 66); glColor3f(1, 1, 1); textMid(972, h - 34.f, st); }
     glColor4f(0.1f, 0.1f, 0.1f, 0.6f); rect(w - 300.f, h - 80.f, 140, 68); rect(w - 150.f, h - 80.f, 140, 68); glColor3f(1, 1, 1); textMid(w - 290.f, h - 34.f, m == M_Record ? L"Pause" : L"Record"); textMid(w - 112.f, h - 34.f, L"Stop"); }
 }
-static int hitButton(int x, int y, int w, int h) { if (x >= 10 && x <= 70 && y >= 10 && y <= 34) return 100; for (int i = 0; i < 6; i++) if (x >= w - 440 + i * 70 && x <= w - 376 + i * 70 && y >= 10 && y <= 34) return cubeViews[i];
+static int hitButton(int x, int y, int w, int h) { if (x >= 10 && x <= 70 && y >= 10 && y <= 34) return 100; for (int i = 0; i < 6; i++) if (x >= cubeX(w) + i * 70 && x <= cubeX(w) + 64 + i * 70 && y >= 10 && y <= 34) return cubeViews[i];
   if (fullView && y >= h - 80 && y <= h - 12) { if (x >= w - 300 && x <= w - 160) return 201; if (x >= w - 150 && x <= w - 10) return 202; } return -1; }
 
 static void render(int w, int h, bool forShot) {
@@ -235,17 +236,17 @@ static void render(int w, int h, bool forShot) {
     glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); } }
   deleteTrashTextures(); if (forShot) return;   // DeepSeek 5-2: no rotation-centre marker in screenshots
   drawRotCentre();
-  overlayBegin(w, h);
+  overlayBegin(w, h); glScalef(UI_K, UI_K, 1); w = (int)(w / UI_K); h = (int)(h / UI_K);   /* the overlay is drawn in design px (fonts are made at the scaled size) */
   if (rangeMeter && mode != M_Idle) drawRangeMeter(w, h); drawGizmo(w, h); drawButtons(w, h);
   // 4 Nov 16:54: after a second loss every frame failed for a minute (314 of 315) — the scanner saw nothing it could
   // track. After 6 s of that, say what to do, in plain words.
   { static clk::time_point lostSince; static bool wasLost = false; if (lost && !wasLost) lostSince = clk::now(); wasLost = lost;
-    if (lost && std::chrono::duration<double>(clk::now() - lostSince).count() > 6.0) { glColor4f(0.85f, 0.45f, 0.05f, 0.85f); rect(0, h / 2.f + 34, (float)w, 34); glColor3f(1, 1, 1); text(w / 2.f - 260, h / 2.f + 56, L"No usable surface: hold the scanner about 25 cm from carved stone, over an area already scanned"); } }
-  if (lost) { if (S.scanUsingAutoAlign) { glColor4f(0.1f, 0.55f, 0.2f, 0.8f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
+    if (lost && std::chrono::duration<double>(clk::now() - lostSince).count() > 6.0) { glColor4f(0.72f, 0.34f, 0.0f, 0.9f); rect(0, h / 2.f + 34, (float)w, 34); glColor3f(1, 1, 1); text(w / 2.f - 260, h / 2.f + 56, L"No usable surface: hold the scanner about 25 cm from carved stone, over an area already scanned"); } }
+  if (lost) { if (S.scanUsingAutoAlign) { glColor4f(0.05f, 0.42f, 0.14f, 0.88f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
     else { glColor4f(0.8f, 0.1f, 0.1f, 0.8f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 210, h / 2.f + 6, L"Tracking lost: Repeat scan using slower motions or additional features"); } }
-  else if (mode == M_Record && g_alignLive.load() && !g_liveFound.load()) { glColor4f(0.1f, 0.55f, 0.2f, 0.8f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
-  else if (mode == M_Record && g_liveFound.load() && std::chrono::duration<double>(clk::now() - (clk::time_point)g_lastSearch).count() < 3.0) { glColor4f(0.1f, 0.55f, 0.2f, 0.6f); rect(w / 2.f - 120, h - 60.f, 240, 30); glColor3f(1, 1, 1); text(w / 2.f - 55, h - 40.f, L"Position found"); }
-  if (g_overheated.load()) { glColor4f(0.85f, 0.45f, 0.05f, 0.85f); rect(0, 44, (float)w, 30); glColor3f(1, 1, 1); text(w / 2.f - 160, 64, L"Scanner overheated — let it cool before continuing"); }
+  else if (mode == M_Record && g_alignLive.load() && !g_liveFound.load()) { glColor4f(0.05f, 0.42f, 0.14f, 0.88f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
+  else if (mode == M_Record && g_liveFound.load() && std::chrono::duration<double>(clk::now() - (clk::time_point)g_lastSearch).count() < 3.0) { glColor4f(0.05f, 0.42f, 0.14f, 0.88f); rect(w / 2.f - 120, h - 60.f, 240, 30); glColor3f(1, 1, 1); text(w / 2.f - 55, h - 40.f, L"Position found"); }
+  if (g_overheated.load()) { glColor4f(0.72f, 0.34f, 0.0f, 0.9f); rect(0, 44, (float)w, 30); glColor3f(1, 1, 1); text(w / 2.f - 160, 64, L"Scanner overheated — let it cool before continuing"); }
   int cd = g_countdown.load(); if (cd > 0) { wchar_t t[32]; swprintf(t, 32, L"Recording in %d…", cd); glColor4f(0, 0, 0, 0.5f); rect(w / 2.f - 100, h / 2.f - 30, 200, 60); glColor3f(1, 1, 1); text(w / 2.f - 60, h / 2.f + 6, t); }
   if (mode == M_Aligning) { glColor4f(0, 0, 0, 0.5f); rect(w / 2.f - 100, h - 60.f, 200, 30); glColor3f(1, 1, 1); text(w / 2.f - 50, h - 40.f, L"Auto-aligning…"); }
   overlayEnd();
@@ -288,7 +289,7 @@ static bool screenshot(const std::wstring& path) {   // Studio: PNG of the 3D Vi
 static LRESULT CALLBACK proc(HWND h, UINT u, WPARAM wp, LPARAM lp) {
   int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp); RECT r; GetClientRect(h, &r); wantRedraw = true;
   switch (u) {
-  case WM_LBUTTONDOWN: { int b = hitButton(x, y, r.right, r.bottom); if (b == 100) { fit(); return 0; } if (b == 201 || b == 202) { PostMessageW(GetParent(h), WM_VIEWBTN, b - 200, 0); return 0; } if (b >= 0) { stdView(b); return 0; } dragL = true; last = {x, y}; SetCapture(h); SetFocus(h); return 0; }
+  case WM_LBUTTONDOWN: { int b = hitButton((int)(x / UI_K), (int)(y / UI_K), (int)(r.right / UI_K), (int)(r.bottom / UI_K)); if (b == 100) { fit(); return 0; } if (b == 201 || b == 202) { PostMessageW(GetParent(h), WM_VIEWBTN, b - 200, 0); return 0; } if (b >= 0) { stdView(b); return 0; } dragL = true; last = {x, y}; SetCapture(h); SetFocus(h); return 0; }
   case WM_LBUTTONDBLCLK: { float p[3]; if (pick(x, y, p)) { memcpy(target, p, sizeof target); rotSet = true; follow = false; } return 0; }
   case WM_MBUTTONDOWN: dragM = true; last = {x, y}; SetCapture(h); return 0;
   case WM_RBUTTONDOWN: dragR = true; last = {x, y}; SetCapture(h); return 0;

@@ -11,6 +11,9 @@ static std::atomic<int> fed{0};              // frames delivered in the current 
 static std::atomic<int> cursor{0};           // next source frame; survives a loss restart (the new procedure continues)
 static int endFrame = 0; static IScan* src = nullptr; static double fps = 5.7;
 static std::atomic<int> loseFrames{0};       // > 0: that many frames are reported as "registration failed"
+// The SDK starts every procedure at the origin: the first fed frame is moved to identity and the rest follow
+// (F' = inv(F0) * F). The replayed pass's true place is then ScanT(src) * F0 (bench::truth).
+static Matrix4x4D F0, F0inv;
 static void setSource(IScan* s, int from, int to) { src = s; cursor = from; endFrame = to; if (s) g_scannerId.type = s->getScannerType(); }
 static void setState(ScanningState s) { state = s == ScanningState_Record ? 2 : s == ScanningState_Preview ? 1 : 3; }
 static void stopNow() { state = 3; }
@@ -22,14 +25,14 @@ static bool start(ScanningState initial) {
   prepareRecording(initial == ScanningState_Record);
   { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); g_live = FrameMesh(); }
   g_stopAsked = false; g_cancelSent = false; g_segPoses.clear(); setState(initial); fed = 0;
-  int gen = ++g_jobGen; IModel* jobOut = g_jobOut; jobOut->addRef(); IScan* s = src; s->addRef(); int from = cursor.load(), to = std::min(endFrame, s->getSize());
+  int gen = ++g_jobGen; IModel* jobOut = g_jobOut; jobOut->addRef(); IScan* s = src; s->addRef(); int from = cursor.load(), to = std::min(endFrame, s->getSize()); if (from < s->getSize()) { F0 = s->getTransformation(from); invRigid(F0.m, F0inv.m); }
   if (g_job.joinable()) g_job.join();
   g_job = std::thread([gen, jobOut, s, from, to] {
     IScan* cur = nullptr; int k = from; int lostLeft = 0; auto next = clk::now();
     while (state.load() != 3) {
       if (k >= to) { std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue; }   // source used up: wait for Stop
       next += std::chrono::microseconds((long long)(1e6 / fps)); std::this_thread::sleep_until(next);
-      IFrameMesh* f = s->getElement(k); Matrix4x4D F = s->getTransformation(k); bool rec = state.load() == 2;
+      IFrameMesh* f = s->getElement(k); Matrix4x4D F; mul44(F0inv.m, s->getTransformation(k).m, F.m); bool rec = state.load() == 2;
       RegistrationInfo i; memset(&i, 0, sizeof i); i.frame = f; i.transformation = F; i.errorCode = ErrorCode_OK;
       int lf = loseFrames.exchange(0); if (lf > 0) lostLeft = lf;
       if (lostLeft > 0) { lostLeft--; i.frameState = FrameState_RegistrationFailed; i.registrationError = -1; }

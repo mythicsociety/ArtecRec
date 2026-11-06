@@ -63,7 +63,8 @@ static bool active = false; static std::wstring out; static int phase = 0, run =
 static clk::time_point t0, tJoin; static bool sawJoin = false, liveJoined = false; static double errStop = -1; static Matrix4x4D truth;
 static std::vector<int> order; static std::vector<std::pair<IScan*, Matrix4x4D>> anchors; static int nOk = 0, nWrong = 0, nAligned = 0, nAlignedWrong = 0, nNot = 0, nAnchorMoved = 0;
 static double dist(const double A[4][4], const double B[4][4]) { return sqrt((A[0][3] - B[0][3]) * (A[0][3] - B[0][3]) + (A[1][3] - B[1][3]) * (A[1][3] - B[1][3]) + (A[2][3] - B[2][3]) * (A[2][3] - B[2][3])); }
-static double errOf(IScan* src, const Matrix4x4D& T) { int n = src->getSize(); if (n <= 0) return -1; double e = 0; for (int k : {0, n / 2, n - 1}) { double A[4][4], B[4][4]; mul44(T.m, src->getTransformation(k).m, A); mul44(truth.m, src->getTransformation(k).m, B); double d = dist(A, B); if (d > e) e = d; } return e; }
+// where three frames of the replayed pass ended up (T * F') against where the saved project has them (ScanT * F)
+static double errOf(IScan* src, const Matrix4x4D& T) { int n = src->getSize(); if (n <= 0) return -1; double e = 0; for (int k : {0, n / 2, n - 1}) { double Fp[4][4], A[4][4], B[4][4]; mul44(replay::F0inv.m, src->getTransformation(k).m, Fp); mul44(T.m, Fp, A); mul44(truth.m, src->getTransformation(k).m, B); double d = dist(A, B); if (d > e) e = d; } return e; }
 static void line(const std::string& s) { FILE* f = _wfopen(out.c_str(), L"ab"); if (f) { fputs(s.c_str(), f); fputs("\n", f); fclose(f); } }
 static double secs(clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); }
 static void finish() { active = false; char b[300]; snprintf(b, sizeof b, "replay bench done: %d run(s); joined ok %d, joined wrong %d, aligned ok %d, aligned wrong %d, not placed %d, anchors moved %d", run + 1, nOk, nWrong, nAligned, nAlignedWrong, nNot, nAnchorMoved); logf("%s", b); line(std::string("# ") + b); g_dirty = false; autosaveCovered(false); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }
@@ -204,16 +205,16 @@ static void updateStatus() {
   if (g_showLog) { std::wstring t; { std::lock_guard<std::mutex> l(g_logMx); size_t n = g_logLines.size(); for (size_t i = n > 5 ? n - 5 : 0; i < n; i++) { t += g_logLines[i]; t += L"\r\n"; } } static std::wstring lastT; if (t != lastT) { SetWindowTextW(g_logBox, t.c_str()); lastT = t; } }
 }
 // Panels (owner, 6 Nov): every panel collapses with a caret and is resized by dragging its edge; sizes are remembered.
-static int g_pwUser = 380, g_wwUser = 500, g_logHUser = 86; static bool g_colPanel = false, g_colWs = false, g_colLog = false;
-static HWND g_capPanel = nullptr, g_capWs = nullptr, g_capLog = nullptr; static const int CAP = 26, GAP = 6;
+static int g_pwUser = 460, g_wwUser = 520, g_logHUser = 104; static bool g_colPanel = false, g_colWs = false, g_colLog = false;
+static HWND g_capPanel = nullptr, g_capWs = nullptr, g_capLog = nullptr; static const int CAP = 32, GAP = 6;
 enum { SPL_NONE, SPL_PANEL, SPL_WS, SPL_LOG }; static int g_drag = SPL_NONE; static RECT g_splPanel = {}, g_splWs = {}, g_splLog = {};
 static std::wstring layoutIni() { return panel::iniPath(); }
 static void saveLayout() { std::wstring f = layoutIni(); auto wi = [&](const wchar_t* k, int v) { wchar_t b[16]; swprintf(b, 16, L"%d", v); WritePrivateProfileStringW(L"layout", k, b, f.c_str()); };
   wi(L"panelW", g_pwUser); wi(L"workspaceW", g_wwUser); wi(L"logH", g_logHUser); wi(L"panelCollapsed", g_colPanel); wi(L"workspaceCollapsed", g_colWs); wi(L"logCollapsed", g_colLog); WritePrivateProfileStringW(nullptr, nullptr, nullptr, f.c_str()); }
 static void loadLayout() { std::wstring f = layoutIni(); auto ri = [&](const wchar_t* k, int d) { return (int)GetPrivateProfileIntW(L"layout", k, d, f.c_str()); };
-  g_pwUser = ri(L"panelW", 380); g_wwUser = ri(L"workspaceW", 500); g_logHUser = ri(L"logH", 86); g_colPanel = ri(L"panelCollapsed", 0) != 0; g_colWs = ri(L"workspaceCollapsed", 0) != 0; g_colLog = ri(L"logCollapsed", 0) != 0; }
+  g_pwUser = ri(L"panelW", 460); g_wwUser = ri(L"workspaceW", 520); g_logHUser = ri(L"logH", 104); g_colPanel = ri(L"panelCollapsed", 0) != 0; g_colWs = ri(L"workspaceCollapsed", 0) != 0; g_colLog = ri(L"logCollapsed", 0) != 0; }
 static void layout() {
-  RECT r; GetClientRect(g_hwnd, &r); int W = r.right, H = r.bottom; int sbH = g_fullView ? 0 : 24; view::fullView = g_fullView; ShowWindow(g_statusBar, g_fullView ? SW_HIDE : SW_SHOW); MoveWindow(g_statusBar, 0, H - sbH, W, sbH, TRUE);
+  RECT r; GetClientRect(g_hwnd, &r); int W = r.right, H = r.bottom; int sbH = g_fullView ? 0 : 30; view::fullView = g_fullView; ShowWindow(g_statusBar, g_fullView ? SW_HIDE : SW_SHOW); MoveWindow(g_statusBar, 0, H - sbH, W, sbH, TRUE);
   bool sp = g_showPanel, sw = g_showWs, sl = g_showLog;
   int pw = !sp ? 0 : g_colPanel ? CAP : std::max(220, std::min(g_pwUser, W / 2)), ww = !sw ? 0 : g_colWs ? CAP : std::max(220, std::min(g_wwUser, W / 2));
   int gl = sp && !g_colPanel ? GAP : 0, gr = sw && !g_colWs ? GAP : 0; int vx = pw + gl, vw = std::max(100, W - pw - gl - ww - gr);
@@ -232,7 +233,7 @@ static void layout() {
   g_splPanel = sp && !g_colPanel ? RECT{pw, 0, pw + GAP, colH} : RECT{}; g_splWs = sw && !g_colWs ? RECT{W - ww - GAP, 0, W - ww, colH} : RECT{}; g_splLog = sl && !g_colLog ? RECT{vx, vh, vx + vw, vh + GAP} : RECT{};
 }
 static int splitterAt(POINT p) { if (PtInRect(&g_splPanel, p)) return SPL_PANEL; if (PtInRect(&g_splWs, p)) return SPL_WS; if (PtInRect(&g_splLog, p)) return SPL_LOG; return SPL_NONE; }
-static void dragSplitter(POINT p) { RECT r; GetClientRect(g_hwnd, &r); int W = r.right, H = r.bottom - (g_fullView ? 0 : 24);
+static void dragSplitter(POINT p) { RECT r; GetClientRect(g_hwnd, &r); int W = r.right, H = r.bottom - (g_fullView ? 0 : 30);
   if (g_drag == SPL_PANEL) g_pwUser = std::max(220, std::min((int)p.x, W / 2)); else if (g_drag == SPL_WS) g_wwUser = std::max(220, std::min(W - (int)p.x, W / 2)); else if (g_drag == SPL_LOG) g_logHUser = std::max(40, std::min(H - CAP - (int)p.y - GAP, H / 2));
   layout(); }
 static void buildMenu() {
@@ -438,7 +439,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   // build date in the title bar (owner, 5 Nov: "how do I know this is the latest version")
   static wchar_t title[128]; swprintf(title, 128, L"%s  -  build %hs %hs", APP, __DATE__, __TIME__); logf("build %s %s", __DATE__, __TIME__);
   g_hwnd = CreateWindowW(L"ArtecRecMain", title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1500, 900, nullptr, nullptr, hi, nullptr);
-  g_font = CreateFontW(17, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); g_fontB = CreateFontW(18, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); g_fontSmall = CreateFontW(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+  g_font = CreateFontW(uik(17), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); g_fontB = CreateFontW(uik(18), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); g_fontSmall = CreateFontW(uik(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
   wchar_t dev[160]; if (scannerOk) swprintf(dev, 160, L"Artec Scanner [%s]", g_scannerId.serial); else wcscpy(dev, L"(no scanner connected)");
   panel::create(g_hwnd, g_font, g_fontB, g_fontSmall, dev); ws::create(g_hwnd, g_font, g_fontB); ws::onChanged = [] { };
   panel::loadIni(); syncMenu();   // Scan-panel settings as the user left them last time (Studio does the same)
