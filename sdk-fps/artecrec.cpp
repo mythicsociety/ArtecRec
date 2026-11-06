@@ -2,6 +2,7 @@
 // Behaviour follows the Artec Studio 17 manual (Scanning, Viewing, Workspace, Settings, Hot Keys chapters).
 // Space Spider on the HP ZBook: USB packet clamped to 960 B via flyhook.h (env FLYPKT overrides).
 #include "rec_sdk.h"
+#include "rec_replay.h"
 #include "rec_view.h"
 #include "rec_panel.h"
 #include "rec_ws.h"
@@ -32,8 +33,8 @@ static void beginRecordNow() {
   if (ml == logic::Mem_Warn) notice(L"Memory is getting low. Save soon and start a new project for the next stone.");
   // review B7/B9: a failed start says so in the panel (no message box) and starts looking for the scanner again
   if (m == M_Idle) { if (!startProcedure(ScanningState_Record)) { notice(L"Could not start the scanner. ArtecRec is looking for it again. If this stays, unplug the scanner's power and USB, wait 10 s, plug power then USB."); startReconnect(); return; } g_mode = M_Record; g_recSecs = 0; g_recStart = clk::now(); }
-  else if (m == M_Preview && g_proc) { prepareRecording(true); g_proc->setState(ScanningState_Record); g_mode = M_Record; g_recSecs = 0; g_recStart = clk::now(); }
-  else if (m == M_Paused && g_proc) { prepareRecording(true); g_proc->setState(ScanningState_Record); g_mode = M_Record; g_recStart = clk::now(); }   // SDK: ContinueRecord unsupported; Resume starts a new scan, as Studio does
+  else if (m == M_Preview && (g_proc || replay::on)) { prepareRecording(true); procSetState(ScanningState_Record); g_mode = M_Record; g_recSecs = 0; g_recStart = clk::now(); }
+  else if (m == M_Paused && (g_proc || replay::on)) { prepareRecording(true); procSetState(ScanningState_Record); g_mode = M_Record; g_recStart = clk::now(); }   // SDK: ContinueRecord unsupported; Resume starts a new scan, as Studio does
   else { notice(L"Recording could not start now (ArtecRec is busy). Press Record again in a moment."); logf("record request ignored in mode %d", m); return; }
   g_dirty = true; view::follow = true; if (g_scans.empty() && view::dist > 400) view::dist = 320;   // start close enough to see the live surface
   // Keyboard focus goes to the 3D view: hiding a focused panel button leaves no focus window, and hotkeys (Ctrl+S…) were dead after a scan (found 2 Nov T6).
@@ -42,7 +43,7 @@ static void beginRecordNow() {
 static void restorePanels() { if (!g_fullView) return; g_fullView = false; g_showPanel = g_savedPanel; g_showWs = g_savedWs; g_showLog = g_savedLog; layout(); SetFocus(view::hwnd); }
 static void doRecord() {
   int m = g_mode.load(); if (m == M_Idle || m == M_Preview) { g_afterLoss = false; g_lossRestart = false; }   /* a recording the user starts is not a loss restart */
-  if (m == M_Record && g_proc) { g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); pushSegmentPose(); g_segPushedAtPause = true; g_proc->setState(ScanningState_Preview); g_mode = M_Paused; logf("paused"); return; }   // review C6
+  if (m == M_Record && (g_proc || replay::on)) { g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); pushSegmentPose(); g_segPushedAtPause = true; procSetState(ScanningState_Preview); g_mode = M_Paused; logf("paused"); return; }   // review C6
   if (g_countdown.load() > 0) return;
   if (!logic::allowed(logic::A_Record, m, !postIdle(), g_stuck)) return;
   if (S.delaySec > 0 && m != M_Paused) { if (!logic::allowed(logic::A_Countdown, m, !postIdle(), g_stuck)) return; /* review F7 */ g_countdown = S.delaySec; g_cdStart = clk::now(); logf("recording in %d s", S.delaySec); return; }
@@ -52,6 +53,92 @@ static void doPreview() { panel::readSettings(); int m = g_mode.load(); if (g_st
   if (m == M_Idle) { if (startProcedure(ScanningState_Preview)) { g_mode = M_Preview; view::follow = true; g_notice.clear(); } else { notice(L"Could not start the scanner. ArtecRec is looking for it again."); startReconnect(); } } else if (m == M_Paused) g_mode = M_Preview; }   // review B7
 // review B5: a Stop pressed while an automatic restart is stopping cancels that restart
 static void doStop() { g_countdown = 0; int m = g_mode.load(); if (m == M_Record) g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); if (m == M_Record || m == M_Preview || m == M_Paused) { g_userStop = true; stopProcedure(); } else if (m == M_Stopping) { g_userStop = true; if (g_autoRestart) notice(L"Stopped. The automatic restart after tracking loss was cancelled; the passes recorded so far are kept."); } }   /* third review: say so */
+// ---------------------------------------------------------------- replay benchmark (6 Nov): artecrec.exe --replay-bench <out.csv> <project.sproj>
+// Each scan of the opened project is replayed in turn as a new pass against the other scans (the scan itself is hidden
+// meanwhile). What a person would see is measured: did it join live and after how many tries, where it ended up after
+// Stop and after the tidy-up/auto-align compared with its saved position, and whether the other scans stayed put.
+static std::wstring g_benchCsv, g_scriptPath; static bool g_benchMid = false;
+namespace bench {
+static bool active = false; static std::wstring out; static int phase = 0, run = -1, scanIdx = -1, countBefore = 0, fedAtJoin = 0, tries = 0; static const int LIMIT = 150;
+static clk::time_point t0, tJoin; static bool sawJoin = false, liveJoined = false; static double errStop = -1; static Matrix4x4D truth;
+static std::vector<int> order; static std::vector<std::pair<IScan*, Matrix4x4D>> anchors; static int nOk = 0, nWrong = 0, nAligned = 0, nAlignedWrong = 0, nNot = 0, nAnchorMoved = 0;
+static double dist(const double A[4][4], const double B[4][4]) { return sqrt((A[0][3] - B[0][3]) * (A[0][3] - B[0][3]) + (A[1][3] - B[1][3]) * (A[1][3] - B[1][3]) + (A[2][3] - B[2][3]) * (A[2][3] - B[2][3])); }
+static double errOf(IScan* src, const Matrix4x4D& T) { int n = src->getSize(); if (n <= 0) return -1; double e = 0; for (int k : {0, n / 2, n - 1}) { double A[4][4], B[4][4]; mul44(T.m, src->getTransformation(k).m, A); mul44(truth.m, src->getTransformation(k).m, B); double d = dist(A, B); if (d > e) e = d; } return e; }
+static void line(const std::string& s) { FILE* f = _wfopen(out.c_str(), L"ab"); if (f) { fputs(s.c_str(), f); fputs("\n", f); fclose(f); } }
+static double secs(clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); }
+static void finish() { active = false; char b[300]; snprintf(b, sizeof b, "replay bench done: %d run(s); joined ok %d, joined wrong %d, aligned ok %d, aligned wrong %d, not placed %d, anchors moved %d", run + 1, nOk, nWrong, nAligned, nAlignedWrong, nNot, nAnchorMoved); logf("%s", b); line(std::string("# ") + b); g_dirty = false; autosaveCovered(false); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }
+static void begin(const std::wstring& csv) { out = csv; active = true; phase = 0; run = -1; order.clear(); for (int i = 0; i < (int)g_scans.size(); i++) if (g_scans[i].scan && g_scans[i].scan->getSize() >= 20) order.push_back(i);
+  if (GetFileAttributesW(out.c_str()) == INVALID_FILE_ATTRIBUTES) line("project,scan,name,frames,fed,liveJoined,tries,joinSecs,errStopMm,errFinalMm,anchorsMovedMm,result"); logf("replay bench: %d run(s) on %s", (int)order.size(), logic::utf8(g_projPath).c_str()); }
+static void step() {
+  int m = g_mode.load();
+  if (phase == 0) { if (m != M_Idle || !postIdle() || g_pendingAlign) return;
+    if (run + 1 >= (int)order.size()) { finish(); return; }
+    run++; scanIdx = order[run]; if (scanIdx >= (int)g_scans.size() || !g_scans[scanIdx].scan) return;
+    IScan* src = g_scans[scanIdx].scan; truth = src->getScanTransformation(); g_scans[scanIdx].visible = false; ws::refresh();
+    anchors.clear(); for (int i = 0; i < (int)g_scans.size(); i++) if (i != scanIdx && g_scans[i].scan) anchors.push_back({g_scans[i].scan, g_scans[i].scan->getScanTransformation()});
+    countBefore = (int)g_scans.size(); int from = g_benchMid ? src->getSize() / 2 : 0; replay::setSource(src, from, std::min(src->getSize(), from + LIMIT)); sawJoin = liveJoined = false; errStop = -1; tries = 0; t0 = clk::now();
+    logf("replay bench: run %d/%d, scan %d \"%ls\" (%d frames) replayed against %d other scan(s)", run + 1, (int)order.size(), scanIdx + 1, g_scans[scanIdx].name.c_str(), src->getSize(), (int)anchors.size());
+    beginRecordNow(); if (g_mode.load() != M_Record) { logf("replay bench: recording did not start; run skipped"); g_scans[scanIdx].visible = true; return; } phase = 1; return; }
+  if (phase == 1) { if (!sawJoin && g_liveFound.load()) { sawJoin = true; tJoin = clk::now(); fedAtJoin = replay::fed.load(); }
+    int want = std::min(g_scans[scanIdx].scan->getSize() - (g_benchMid ? g_scans[scanIdx].scan->getSize() / 2 : 0), LIMIT);
+    if ((sawJoin && replay::fed.load() >= fedAtJoin + 40) || replay::fed.load() >= want || secs(t0, clk::now()) > 90) { tries = g_searchTries.load(); doStop(); phase = 2; } return; }
+  if (phase == 2) { if (m != M_Idle) return;   /* jobDone ran: the new scan is in the Workspace; its tidy-up may still run */
+    if ((int)g_scans.size() > countBefore) { auto& r = g_scans.back(); liveJoined = r.placed; if (r.placed && r.scan) errStop = errOf(g_scans[scanIdx].scan, r.scan->getScanTransformation()); } phase = 3; return; }
+  if (phase == 3) { if (m != M_Idle || !postIdle() || g_pendingAlign || g_pendingSave) return;
+    bool added = (int)g_scans.size() > countBefore; double errFinal = -1; bool placedFinal = false; IScan* src = g_scans[scanIdx].scan;
+    if (added) { auto& r = g_scans.back(); placedFinal = r.placed; if (r.scan) errFinal = errOf(src, r.scan->getScanTransformation()); }
+    double moved = 0; for (auto& a : anchors) for (auto& r : g_scans) if (r.scan == a.first) { Matrix4x4D T = r.scan->getScanTransformation(); double d = dist(T.m, a.second.m); if (d > moved) moved = d; }
+    logic::BenchResult v = logic::benchVerdict(liveJoined, placedFinal, errFinal); static const char* vs[] = {"JOINED_OK", "JOINED_WRONG", "ALIGNED_OK", "ALIGNED_WRONG", "NOT_PLACED"};
+    if (v == logic::B_JoinedOk) nOk++; else if (v == logic::B_JoinedWrong) nWrong++; else if (v == logic::B_AlignedOk) nAligned++; else if (v == logic::B_AlignedWrong) nAlignedWrong++; else nNot++; if (!logic::anchorsHeld(moved)) nAnchorMoved++;
+    char b[700]; snprintf(b, sizeof b, "%s,%d,%s,%d,%d,%d,%d,%.1f,%.2f,%.2f,%.2f,%s%s", logic::utf8(logic::leafOf(g_projPath)).c_str(), scanIdx + 1, logic::utf8(g_scans[scanIdx].name).c_str(), src->getSize(), replay::fed.load(), liveJoined ? 1 : 0, tries, sawJoin ? secs(t0, tJoin) : -1.0, errStop, errFinal, moved, vs[v], logic::anchorsHeld(moved) ? "" : "+ANCHOR_MOVED");
+    line(b); logf("replay bench: %s", b);
+    if (added) { std::lock_guard<std::mutex> l(g_scanMx); auto& r = g_scans.back(); if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); g_scans.pop_back(); }
+    g_scans[scanIdx].visible = true; rebuildMaster(); view::selectedScan = -1; ws::refresh(); phase = 0; return; }
+}
+}  // namespace bench
+// ---------------------------------------------------------------- scripted replay session (6 Nov): artecrec.exe --replay-script <file> <project.sproj>
+// One command per line; the session runs on its own and every "expect" that fails is logged as "SCRIPT FAIL". Commands:
+//   hide N | show N              a scan of the opened project (1-based)
+//   record N FROM TO             start recording: scan N's frames FROM..TO are fed as a new pass
+//   wait fed K | wait secs S     wait until K frames were fed in this procedure / S seconds
+//   lose K                       the next K frames are reported as "registration failed" (a tracking loss)
+//   stop                         press Stop, then wait until the recording has ended
+//   settle                       wait until nothing is processing or aligning
+//   expect scans N               the project holds N scans
+//   expect placed N 1|0          scan N's placed flag
+//   expect last near MM          the newest scan is within MM of the saved position of the scan it was replayed from
+//   expect still N MM            scan N has moved at most MM since the script started
+//   end                          write the summary and close ArtecRec
+namespace script {
+static bool active = false; static std::vector<std::vector<std::wstring>> cmds; static size_t pc = 0; static int fails = 0, checks = 0; static clk::time_point tw; static bool waiting = false; static int waitFed = 0; static double waitSecs = 0; static int waitKind = 0;
+static std::vector<Matrix4x4D> start; static int lastSrc = -1;
+static bool load(const std::wstring& path) { FILE* f = _wfopen(path.c_str(), L"r, ccs=UTF-8"); if (!f) return false; wchar_t line[512]; cmds.clear();
+  while (fgetws(line, 512, f)) { std::wstring l = line; while (!l.empty() && (l.back() == L'\n' || l.back() == L'\r' || l.back() == L' ')) l.pop_back(); if (l.empty() || l[0] == L'#') continue; std::vector<std::wstring> t; size_t p = 0; while (p < l.size()) { size_t q = l.find(L' ', p); if (q == std::wstring::npos) q = l.size(); if (q > p) t.push_back(l.substr(p, q - p)); p = q + 1; } if (!t.empty()) cmds.push_back(t); }
+  fclose(f); for (auto& r : g_scans) start.push_back(r.scan ? r.scan->getScanTransformation() : Matrix4x4D()); active = true; pc = 0; logf("replay script: %d command(s), %d scan(s)", (int)cmds.size(), (int)g_scans.size()); return true; }
+static void check(bool ok, const char* what) { checks++; if (!ok) { fails++; logf("SCRIPT FAIL: %s", what); } else logf("script ok: %s", what); }
+static int num(const std::wstring& w) { return _wtoi(w.c_str()); }
+static void step() {
+  int m = g_mode.load();
+  if (waiting) { bool done = waitKind == 1 ? replay::fed.load() >= waitFed : waitKind == 2 ? std::chrono::duration<double>(clk::now() - tw).count() >= waitSecs : waitKind == 3 ? (m == M_Idle) : (m == M_Idle && postIdle() && !g_pendingAlign && !g_pendingSave); if (!done) return; waiting = false; }
+  if (pc >= cmds.size()) { active = false; logf("replay script done: %d check(s), %d failed", checks, fails); g_dirty = false; autosaveCovered(false); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); return; }
+  auto& c = cmds[pc++]; const std::wstring& op = c[0]; char b[300];
+  auto scanAt = [&](int n) -> ScanRec* { return n >= 1 && n <= (int)g_scans.size() ? &g_scans[n - 1] : nullptr; };
+  if (op == L"hide" || op == L"show") { if (ScanRec* r = scanAt(num(c[1]))) { r->visible = op == L"show"; ws::refresh(); } }
+  else if (op == L"record" && c.size() >= 4) { ScanRec* r = scanAt(num(c[1])); if (!r || !r->scan) { logf("SCRIPT FAIL: record: no scan %ls", c[1].c_str()); fails++; return; } lastSrc = num(c[1]) - 1; replay::setSource(r->scan, num(c[2]), num(c[3])); beginRecordNow(); check(g_mode.load() == M_Record, "recording started"); }
+  else if (op == L"wait" && c.size() >= 3) { waiting = true; if (c[1] == L"fed") { waitKind = 1; waitFed = num(c[2]); } else { waitKind = 2; waitSecs = _wtof(c[2].c_str()); tw = clk::now(); } }
+  else if (op == L"lose" && c.size() >= 2) { replay::loseTracking(num(c[1])); logf("script: tracking loss of %d frames injected", num(c[1])); }
+  else if (op == L"stop") { doStop(); waiting = true; waitKind = 3; }
+  else if (op == L"settle") { waiting = true; waitKind = 4; }
+  else if (op == L"expect" && c.size() >= 3) {
+    if (c[1] == L"scans") { snprintf(b, sizeof b, "expect scans %d (have %d)", num(c[2]), (int)g_scans.size()); check((int)g_scans.size() == num(c[2]), b); }
+    else if (c[1] == L"placed" && c.size() >= 4) { ScanRec* r = scanAt(num(c[2])); snprintf(b, sizeof b, "expect placed %d = %d (is %d)", num(c[2]), num(c[3]), r ? (int)r->placed : -1); check(r && (int)r->placed == num(c[3]), b); }
+    else if (c[1] == L"last" && c.size() >= 4) { double e = -1; if (!g_scans.empty() && lastSrc >= 0 && lastSrc < (int)g_scans.size() && g_scans.back().scan && g_scans[lastSrc].scan) { bench::truth = g_scans[lastSrc].scan->getScanTransformation(); e = bench::errOf(g_scans[lastSrc].scan, g_scans.back().scan->getScanTransformation()); } snprintf(b, sizeof b, "expect last near %.1f mm (is %.2f mm)", _wtof(c[3].c_str()), e); check(e >= 0 && e <= _wtof(c[3].c_str()), b); }
+    else if (c[1] == L"still" && c.size() >= 4) { int n = num(c[2]); double d = -1; if (n >= 1 && n <= (int)start.size() && g_scans[n - 1].scan) d = bench::dist(g_scans[n - 1].scan->getScanTransformation().m, start[n - 1].m); snprintf(b, sizeof b, "expect scan %d still within %.2f mm (moved %.2f mm)", n, _wtof(c[3].c_str()), d); check(d >= 0 && d <= _wtof(c[3].c_str()), b); } }
+  else if (op == L"log") { std::wstring t; for (size_t i = 1; i < c.size(); i++) t += (i > 1 ? L" " : L"") + c[i]; logf("script: %ls", t.c_str()); }
+  else if (op == L"end") { pc = cmds.size(); }
+  else { logf("SCRIPT FAIL: unknown command %ls", op.c_str()); fails++; }
+}
+}  // namespace script
 // Scanner body buttons (manual, "Hardware Buttons"): Record button → Preview, then Record, then toggles Preview/Record; Stop → Stop.
 static void scannerButton(int b) {
   int m = g_mode.load();
@@ -111,7 +198,7 @@ static void updateStatus() {
   static wchar_t proc[96]; if (m == M_Idle && !g_pendingSave) { int on = optimisingNow(); if (on > 0) { swprintf(proc, 96, L"Optimising %d pass(es)... (Edit > Cancel processing to stop)", on); ms = proc; } }
   swprintf(b, 512, L"%.1f fps\r\n\r\nSurfaces recorded: %ld\r\nRecording time: %d:%02d\r\nRegistration failures: %ld   %s\r\n\r\n%s\r\n%s", (m == M_Idle) ? 0.0 : fps, shown, (int)secs / 60, (int)secs % 60, g_regFail.load(), g_alignMsg.get().c_str(), ms, nt.c_str());
   panel::setStatus(b); panel::enableForMode(m);
-  const wchar_t* temp = !g_scanner ? L"Scanner: not connected" : g_overheated.load() ? L"Scanner temperature: TOO HOT - let it cool" : L"Scanner temperature: normal";   // the SDK reports only overheated / back to normal, no degrees
+  const wchar_t* temp = !g_scanner ? (replay::on ? L"REPLAY - no scanner" : L"Scanner: not connected") : g_overheated.load() ? L"Scanner temperature: TOO HOT - let it cool" : L"Scanner temperature: normal";   // the SDK reports only overheated / back to normal, no degrees
   wchar_t sb[720]; swprintf(sb, 720, L"  Build %hs %hs   |   %s   |   Free RAM: %.0f MB   |   Total memory in use: %.0f MB   |   %s%s%s%s", __DATE__, __TIME__, temp, freeGB() * 1024, wsGB() * 1024, m == M_Idle ? L"Ready" : ms, g_dirty ? L"   |   NOT SAVED" : L"", nt.empty() ? L"" : L"   |   ", nt.c_str()); SetWindowTextW(g_statusBar, sb);
   if (g_showLog) { std::wstring t; { std::lock_guard<std::mutex> l(g_logMx); size_t n = g_logLines.size(); for (size_t i = n > 5 ? n - 5 : 0; i < n; i++) { t += g_logLines[i]; t += L"\r\n"; } } static std::wstring lastT; if (t != lastT) { SetWindowTextW(g_logBox, t.c_str()); lastT = t; } }
 }
@@ -215,7 +302,7 @@ static bool hotkey(WPARAM k) {
 }
 static void startReconnect() { if (!g_reconnect) { g_reconnect = true; g_reconnectAdvised = false; g_reconnectStart = clk::now(); g_reconnectLast = clk::time_point(); } int m = g_mode.load(); if (m == M_Preview || m == M_Record || m == M_Paused) stopProcedure(); }
 static void onTimer() {
-  int m = g_mode.load();
+  int m = g_mode.load(); if (bench::active) bench::step(); if (script::active) script::step();
   if (g_countdown.load() > 0) { int left = S.delaySec - (int)std::chrono::duration<double>(clk::now() - g_cdStart).count(); if (left <= 0) { g_countdown = 0; beginRecordNow(); } else g_countdown = left; }
   if (m == M_Record && S.limitFrames && g_frames.load() >= S.frameLimit && !g_autoRestart) { g_autoRestart = true; g_limitRestart = true; g_resumeGroupWith = (int)g_scans.size(); logf("frame limit %d reached: new scan, placed and grouped with this one", S.frameLimit); /* review A8 */ g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); stopProcedure(); }
   // Studio's "Searching for position" at the start of a scan recorded with "Auto-align new scans with those marked"
@@ -343,7 +430,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   createModel(&g_master); g_obs = new Obs();
   // No scanner at start (3 Nov 17:10: cameras wedged after a USB drop, createScanner 0xC0050000): open the window
   // anyway and keep trying to connect; the status bar says what to do. No modal box, no exit.
-  bool scannerOk = connectScanner(); if (!scannerOk) logf("no scanner at start: will keep trying");
+  bool scannerOk = replay::on ? false : connectScanner(); if (!scannerOk && !replay::on) logf("no scanner at start: will keep trying");
   WNDCLASSW wc = {}; wc.lpfnWndProc = wndProc; wc.hInstance = hi; wc.lpszClassName = L"ArtecRecMain"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); RegisterClassW(&wc);
   WNDCLASSW gc = {}; gc.lpfnWndProc = view::proc; gc.hInstance = hi; gc.lpszClassName = L"ArtecRecGL"; gc.style = CS_OWNDC | CS_DBLCLKS; gc.hCursor = LoadCursor(nullptr, IDC_ARROW); RegisterClassW(&gc);
   // build date in the title bar (owner, 5 Nov: "how do I know this is the latest version")
@@ -359,7 +446,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   for (HWND* c : {&g_capPanel, &g_capWs, &g_capLog}) { *c = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_LEFT, 0, 0, 10, 10, g_hwnd, nullptr, hi, nullptr); SendMessageW(*c, WM_SETFONT, (WPARAM)g_fontB, TRUE); }   // panel carets
   loadLayout();
   buildMenu(); syncMenu(); layout(); updateStatus(); ShowWindow(g_hwnd, SW_SHOWMAXIMIZED); SetTimer(g_hwnd, 1, 40, nullptr);
-  if (!scannerOk) startReconnect();
+  if (!scannerOk && !replay::on) startReconnect();
   // DeepSeek 4: a save interrupted by a power loss between its two folder moves leaves the project folder missing, with
   // the new copy in <name>__saving and the old one in <name>__previous. Say so at the next start (no automatic moves).
   { wchar_t lp[MAX_PATH] = L""; GetPrivateProfileStringW(L"scan", L"lastProject", L"", lp, MAX_PATH, panel::iniPath().c_str()); std::wstring pr = lp;
@@ -369,7 +456,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
         std::wstring m = L"The last save of\n" + d + L"\nwas interrupted (power loss?). Your scans are safe:\n\n" + (sav ? L"New copy:  " + d + L"__saving\n" : L"") + (prv ? L"Previous copy:  " + d + L"__previous\n" : L"") + L"\nTo use the new copy, rename the folder \"" + logic::leafOf(d) + L"__saving\" to \"" + logic::leafOf(d) + L"\" in Explorer, then open it. Or tell the support channel.";
         MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONWARNING); } } }
   bool autosaveTest = false, processTest = false; std::wstring cmdl = cmd ? cmd : L""; { size_t at = cmdl.find(L"--autosave-test"); if (at != std::wstring::npos) { autosaveTest = true; cmdl.erase(at, 15); }
-    at = cmdl.find(L"--process-test"); if (at != std::wstring::npos) { processTest = true; cmdl.erase(at, 14); } cmdl.erase(std::remove(cmdl.begin(), cmdl.end(), L'"'), cmdl.end()); while (!cmdl.empty() && (cmdl.back() == L' ' || cmdl.back() == L'	')) cmdl.pop_back(); while (!cmdl.empty() && cmdl.front() == L' ') cmdl.erase(cmdl.begin()); }
+    at = cmdl.find(L"--process-test"); if (at != std::wstring::npos) { processTest = true; cmdl.erase(at, 14); }
+    at = cmdl.find(L"--replay-bench"); if (at != std::wstring::npos) { size_t b = at + 14; while (b < cmdl.size() && cmdl[b] == L' ') b++; size_t e = cmdl.find(L' ', b); if (e == std::wstring::npos) e = cmdl.size(); g_benchCsv = cmdl.substr(b, e - b); cmdl.erase(at, e - at); replay::on = true; }
+    at = cmdl.find(L"--replay-from-mid"); if (at != std::wstring::npos) { g_benchMid = true; cmdl.erase(at, 17); }
+    at = cmdl.find(L"--replay-script"); if (at != std::wstring::npos) { size_t b = at + 15; while (b < cmdl.size() && cmdl[b] == L' ') b++; size_t e = cmdl.find(L' ', b); if (e == std::wstring::npos) e = cmdl.size(); g_scriptPath = cmdl.substr(b, e - b); cmdl.erase(at, e - at); replay::on = true; } cmdl.erase(std::remove(cmdl.begin(), cmdl.end(), L'"'), cmdl.end()); while (!cmdl.empty() && (cmdl.back() == L' ' || cmdl.back() == L'	')) cmdl.pop_back(); while (!cmdl.empty() && cmdl.front() == L' ') cmdl.erase(cmdl.begin()); }
   // autosave recovery: passes recorded after the last save of a session that did not end normally
   if (cmdl.empty()) { auto rec = autosaveRecoverable(); for (auto& r : rec) { int n = (int)r.second.size();
       std::wstring q = L"ArtecRec did not close normally last time.\n\n" + std::to_wstring(n) + L" pass(es) recorded after the last save were autosaved (" + logic::leafOf(r.first) + L").\n\nLoad them now? Then save the project.\n\nNo = keep them and ask again next time.";
@@ -377,7 +467,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
       break; } }
   if (!cmdl.empty()) { std::wstring p = cmdl; if (p.size() > 2 && p.front() == L'"') p = p.substr(1, p.size() - 2); openPath(p); }   // review A9: Busy while loading (no recording meanwhile)
   if (autosaveTest) { int n = 0; for (auto& sc : g_scans) { autosaveScan(sc.scan, sc.name); n++; } logf("autosave test: %d pass(es) queued", n); }
-  if (processTest) { int n = 0; for (auto& sc : g_scans) { startPostProcess(sc.scan, true); n++; } logf("process test: %d pass(es) being optimised", n); }   // review A9: Busy while loading (no recording meanwhile)
+  if (processTest) { int n = 0; for (auto& sc : g_scans) { startPostProcess(sc.scan, true); n++; } logf("process test: %d pass(es) being optimised", n); }
+  if (replay::on && !g_scriptPath.empty()) { if (g_scans.empty() || !script::load(g_scriptPath)) { logf("replay script: no project with scans, or the script could not be read"); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); } }
+  else if (replay::on) { if (g_scans.empty() || g_benchCsv.empty()) { logf("replay bench: no project with scans, or no output file"); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); } else bench::begin(g_benchCsv); }   // review A9: Busy while loading (no recording meanwhile)
   MSG msg; while (GetMessageW(&msg, nullptr, 0, 0)) {
     if (msg.message == WM_MOUSEWHEEL) { POINT p; GetCursorPos(&p); HWND w = WindowFromPoint(p); if (w && w != panel::hwnd && GetParent(w) == panel::hwnd) msg.hwnd = panel::hwnd; }   // wheel over a slider/checkbox scrolls the Scan panel (Studio), it does not move the control (found 2 Nov T29)
     if (msg.message == WM_KEYDOWN) { wchar_t cls[32] = L""; GetClassNameW(msg.hwnd, cls, 32); bool edit = !_wcsicmp(cls, L"Edit"); if ((!edit || GetKeyState(VK_CONTROL) < 0 || msg.wParam == VK_F7 || msg.wParam == VK_F11) && hotkey(msg.wParam)) continue; }

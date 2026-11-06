@@ -332,6 +332,8 @@ struct Obs : public ScanningProcedureObserverBase {
 };
 static Obs* g_obs;
 
+// replay source (rec_replay.h): frames from a saved pass in place of the scanner; see --replay-bench in artecrec.cpp
+namespace replay { inline bool on = false; static bool start(ScanningState initial); static void setState(ScanningState s); static void stopNow(); }
 // ---------------------------------------------------------------- scanner / procedure
 static void disconnectScanner() { if (g_scanner) { g_scanner->setObserver(nullptr); g_scanner->release(); g_scanner = nullptr; } if (g_scanObs) { g_scanObs->release(); g_scanObs = nullptr; } }
 static bool connectScanner() {
@@ -380,6 +382,7 @@ static void pushSegmentPose() { logic::SegmentPose p; p.keyFrames = (int)g_keyFr
 static std::atomic<int> g_jobGen{0};
 static bool startProcedure(ScanningState initial) {
   { std::lock_guard<std::mutex> l(g_joinMx); g_joinedTo.clear(); }
+  if (replay::on) return replay::start(initial);
   if (g_stuck) { logf("start refused: the scanner job is stuck; restart ArtecRec"); return false; } g_segPushedAtPause = false;
   if (!g_scanner) { logf("start refused: no scanner connected"); return false; }
   ScanningProcedureSettings st; initializeScanningProcedureSettings(&st);
@@ -413,7 +416,8 @@ static bool startProcedure(ScanningState initial) {
 }
 // Review B1/B8: Stop also stops the position search, and the SDK's setState runs on a helper thread so a scanner that
 // stopped answering cannot freeze the window (the 8 s cancel below runs from the same UI timer).
-static void stopProcedure() { if (g_proc && !g_jobDone) { g_mode = M_Stopping; g_searchStop = true; if (!g_stopAsked) { g_stopAsked = true; g_stopAt = clk::now(); IScanningProcedure* p = g_proc; p->addRef(); std::thread([p] { p->setState(ScanningState_Stop); p->release(); }).detach(); } } }
+static void stopProcedure() { if (replay::on) { if (!g_jobDone) { g_mode = M_Stopping; g_searchStop = true; g_stopAsked = true; g_stopAt = clk::now(); replay::stopNow(); } return; }
+  if (g_proc && !g_jobDone) { g_mode = M_Stopping; g_searchStop = true; if (!g_stopAsked) { g_stopAsked = true; g_stopAt = clk::now(); IScanningProcedure* p = g_proc; p->addRef(); std::thread([p] { p->setState(ScanningState_Stop); p->release(); }).detach(); } } }
 // 5 Nov 12:01: the scanner dropped off USB mid-recording; the SDK procedure never returned from Stop (waitForTriggerReady
 // errors, ~1,500 in 6 min) and ArtecRec sat in "Stopping" until killed in Task Manager — three unsaved scans lost.
 // If Stop has not finished in 8 s, cancel the procedure through its cancellation token.
@@ -1242,7 +1246,7 @@ static void autosaveWorker() {
 }
 // Queue a pass for autosave (UI or align thread). Holds its own reference until it is written.
 static void autosaveScan(IScan* s, const std::wstring& name) {
-  if (!s) return; std::lock_guard<std::mutex> l(g_autoMx);
+  if (!s || replay::on) return;   /* a replay never autosaves */ std::lock_guard<std::mutex> l(g_autoMx);
   if (g_autoSession.empty()) { g_autoSession = autosaveRoot() + L"\\" + nowStamp(); }
   if (!g_autoRun) { g_autoRun = true; std::thread(autosaveWorker).detach(); }
   int id; auto f = g_autoId.find(s); if (f != g_autoId.end()) id = f->second; else { id = g_autoNextId++; g_autoId[s] = id; }

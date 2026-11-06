@@ -1,0 +1,27 @@
+# Replay script: the two field bugs of 6 Nov (Trail26/27), as a regression test.
+# Run: artecrec.exe --replay-script C:\Artec\tests\e2e\replay-field-bugs.txt <project with >= 3 scans>
+# The project's scans 1 and 2 stay as the "stone already scanned"; scan 3 is replayed as new passes.
+#
+# Bug 1 (16:38): a pass joined live to scan 2; auto-align then moved scan 2's partner by 5 mm.
+# Here: scan 3 is replayed from its middle (a resume over scanned surface). If it joins live, the scan it joined
+# must be an anchor afterwards, and no earlier scan may move.
+hide 3
+record 3 80 160
+wait fed 70
+stop
+settle
+expect scans 4
+expect still 1 0.05
+expect still 2 0.05
+# Bug 2 (16:06, 16:37): after a tracking loss the restart recorded a 13-16 frame stub before the user's Stop; it was kept.
+# Here: a second pass, a loss after 40 frames, then Stop 2 s after the restart. No stub may remain.
+record 3 0 160
+wait fed 40
+lose 12
+wait secs 3
+stop
+settle
+expect scans 5
+expect still 1 0.05
+expect still 2 0.05
+end

@@ -226,6 +226,16 @@ inline bool discardStub(int frames, bool found, bool afterLoss) { if (frames < 1
 // moved 5.1 mm after scan 2 had joined it to 0.18 mm, because only scan 2 counted as placed).
 inline void anchorJoinTargets(std::vector<bool>& placed, const std::vector<int>& joinedTo) { for (int i : joinedTo) if (i >= 0 && i < (int)placed.size()) placed[i] = true; }
 
+// ---------------------------------------------------------------- replay benchmark verdict (6 Nov)
+// A saved pass replayed against the other passes of its project: did it join live, is it in the saved place at the end
+// (within okMm), and did the passes it was joined to stay put (anchorsHeld)?
+enum BenchResult { B_JoinedOk, B_JoinedWrong, B_AlignedOk, B_AlignedWrong, B_NotPlaced };
+inline BenchResult benchVerdict(bool liveJoined, bool placedFinal, double errFinalMm, double okMm = 5.0) {
+  if (!placedFinal) return B_NotPlaced;
+  if (liveJoined) return errFinalMm >= 0 && errFinalMm <= okMm ? B_JoinedOk : B_JoinedWrong;
+  return errFinalMm >= 0 && errFinalMm <= okMm ? B_AlignedOk : B_AlignedWrong; }
+inline bool anchorsHeld(double maxMovedMm) { return maxMovedMm <= 0.05; }
+
 // ---------------------------------------------------------------- autosave manifest (6 Nov, per-pass background autosave)
 // One manifest per session: "P\t<id>\t<folder>\t<name>" a pass saved (a later P with the same id replaces it, e.g. after
 // auto-align moved the pass); "S\t<time>" the project was saved (everything before is covered); "X\t<time>" the user

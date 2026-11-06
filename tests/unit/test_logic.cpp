@@ -461,4 +461,12 @@ TEST(join_target_becomes_anchor, "after-stop") {
   std::vector<bool> q = {false}; anchorJoinTargets(q, {}); CHECK(!q[0]);
 }
 
+// ================================================================= replay benchmark verdict (6 Nov)
+TEST(bench_verdict, "replay") {
+  CHECK_EQ(benchVerdict(true, true, 0.4), B_JoinedOk); CHECK_EQ(benchVerdict(true, true, 5.0), B_JoinedOk); CHECK_EQ(benchVerdict(true, true, 5.1), B_JoinedWrong);
+  CHECK_EQ(benchVerdict(false, true, 1.0), B_AlignedOk); CHECK_EQ(benchVerdict(false, true, 300), B_AlignedWrong);
+  CHECK_EQ(benchVerdict(true, false, 1.0), B_NotPlaced); CHECK_EQ(benchVerdict(true, true, -1), B_JoinedWrong);   // no measurement = not ok
+  CHECK(anchorsHeld(0)); CHECK(anchorsHeld(0.05)); CHECK(!anchorsHeld(5.1));   // 16:38: scan 1 moved 5.1 mm
+}
+
 int main(int argc, char** argv) { return tfw::run(argc, argv, "unit-logic"); }
