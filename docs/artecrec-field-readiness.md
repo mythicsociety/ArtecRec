@@ -33,6 +33,45 @@ further changes before the trip except for a critical defect.
 | Memory on very large projects | warning at 16 GB free, recording refused below 6 GB | one project per stone; save often |
 | No timed autosave | status bar shows NOT SAVED; Save queues itself while processing | save after every 2–3 passes |
 
+## Release candidate (6 Nov 09:17)
+
+Tag `field-rc-2026-11-06` = commit `123e0e1`. Installed on the field laptop: D:\ArtecRec\artecrec.exe,
+MD5 89612F7B5FB600F276760BBC78C81E2F (previous field build kept as D:\ArtecDiag\artecrec-prev-1211.exe).
+Review rounds applied after the first status above: cloud review (10), ChatGPT R1-R4, Gemini (7), DeepSeek 1-7
+(24 + 3). Tests: 84 passed, 0 failed, 0 skipped.
+
+## Still needing a field check (verified by code reading only)
+
+| Item | How the acceptance session or the trip shows it |
+|---|---|
+| Live joining after the 6 Nov search changes | log: "FOUND" per pass, "vs pass N", gate reasons |
+| Abandoned search cannot touch the live view / place a pass | only if a search ignores its cancel (log: "did not stop in 10 s") |
+| A save given up on (after 15 min) | only if a save hangs; message names the folders |
+| Graphics memory freed while minimised | minimise during a long pass; memory in the status bar stays flat |
+| Redraw and frame-lock times | "rec fps" lines: longest draw / longest frame-lock wait |
+| Reconnect on the window thread | USB pull during the session |
+| A long project (thousands of frames) under low disk space | one long stone on the laptop before the trip if time allows |
+
+## Field procedure (prices in the remaining risk)
+
+1. One project per stone. Save after every 2-3 passes.
+2. At the end of each day: File > Save project as... to a NEW folder name with the date (for example
+   Belur_pillar3_12Nov). This keeps every day's work in its own folder, whatever happens to later saves.
+3. Copy the day's folders to the second drive or the other laptop in the evening.
+4. Full scanner battery each morning; charger and adapter in the bag. Repeated USB drops = check the battery first.
+
+## Recovery card (print and keep with the laptop)
+
+- **ArtecRec crashed or was closed by Task Manager:** everything up to the last save is on disk in its project
+  folder. Reopen ArtecRec from the desktop shortcut and open that project. Passes recorded after the last save are lost.
+- **"The last save was interrupted":** ArtecRec names two folders. The new copy is `<name>__saving`, the previous one
+  `<name>__previous`. In Explorer, rename `<name>__saving` to `<name>`, then open it in ArtecRec. Do not delete either
+  folder until the project opens correctly.
+- **"The scanner stopped answering":** save the project now, close ArtecRec, unplug the scanner's power and USB for
+  10 s, plug in power then USB, reopen ArtecRec.
+- **Save refused ("already holds other files"):** nothing was changed. Save under a new name.
+- **Anything else:** save under a new name, note the time, and send the support channel the time and a photo of the screen.
+
 ## After the trip (agreed priorities)
 
 1. Worker lifecycle and SDK cancellation architecture. 2. Asynchronous scanner reconnection. 3. Rendering/memory
