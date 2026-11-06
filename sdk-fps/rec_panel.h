@@ -120,6 +120,7 @@ static void saveIni() {
   wi(L"iniVersion", 2); wi(L"tracking", S.tracking); wi(L"distColor", S.distColor); wi(L"autoAlign", S.autoAlign); wi(L"hidePanel", S.hidePanel); wi(L"speed", S.speed); wi(L"near", (int)S.nearMm.load()); wi(L"far", (int)S.farMm.load());
   wi(L"sens", (int)(S.sens * 100 + 0.5f)); wi(L"texBright", (int)(S.texBright * 100 + 0.5f)); wi(L"autoBright", S.autoBright); wi(L"recordTexture", S.recordTexture); wi(L"flash", S.flash); wi(L"texFreq", S.texFreq); wi(L"texEvery", S.texEvery);
   wi(L"delay", S.delaySec); wi(L"limitFrames", S.limitFrames); wi(L"frameLimit", S.frameLimit); wi(L"audio", S.audio); wi(L"scanUsingAutoAlign", S.scanUsingAutoAlign); wi(L"shotBg", S.shotBg); wi(L"advOpen", advOpen);
+  if (!g_projPath.empty()) WritePrivateProfileStringW(L"scan", L"lastProject", g_projPath.c_str(), f.c_str());   // DeepSeek 4: checked at the next start
   BOOL ok = WritePrivateProfileStringW(L"scan", L"scanName", S.scanName.c_str(), f.c_str());
   WritePrivateProfileStringW(nullptr, nullptr, nullptr, f.c_str());   // flush Windows' ini cache now; otherwise a killed process loses the settings (found 2 Nov)
   if (!ok) logf("settings could not be saved to %ls", f.c_str());

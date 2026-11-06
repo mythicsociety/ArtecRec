@@ -69,6 +69,7 @@ static std::wstring askPath(bool save) {
 // is never overwritten (Save As with a new name instead); a save asked for while scans are still being tidied, or while
 // stopping/aligning, waits and runs by itself afterwards; a failure says what happened and where the data is.
 static bool doSaveNow(const std::wstring& target) {
+  WritePrivateProfileStringW(L"scan", L"lastProject", target.c_str(), panel::iniPath().c_str()); WritePrivateProfileStringW(nullptr, nullptr, nullptr, panel::iniPath().c_str());   // DeepSeek 4: known before the folder moves start
   g_mode = M_Busy; SetCursor(LoadCursor(nullptr, IDC_WAIT)); bool ok = saveProject(target); g_mode = M_Idle; SetCursor(LoadCursor(nullptr, IDC_ARROW));
   if (ok) { g_notice.clear(); notice(L"Saved: " + target); } else { std::wstring m = L"The project was NOT saved.\n\n" + (g_saveErr.empty() ? std::wstring(L"See artecrec.log.") : g_saveErr); MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONERROR); }
   ws::showProps(); return ok;
@@ -321,6 +322,14 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   g_statusBar = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 10, 10, g_hwnd, nullptr, hi, nullptr); SendMessageW(g_statusBar, WM_SETFONT, (WPARAM)g_font, TRUE);
   buildMenu(); syncMenu(); layout(); updateStatus(); ShowWindow(g_hwnd, SW_SHOWMAXIMIZED); SetTimer(g_hwnd, 1, 40, nullptr);
   if (!scannerOk) startReconnect();
+  // DeepSeek 4: a save interrupted by a power loss between its two folder moves leaves the project folder missing, with
+  // the new copy in <name>__saving and the old one in <name>__previous. Say so at the next start (no automatic moves).
+  { wchar_t lp[MAX_PATH] = L""; GetPrivateProfileStringW(L"scan", L"lastProject", L"", lp, MAX_PATH, panel::iniPath().c_str()); std::wstring pr = lp;
+    if (!pr.empty()) { std::wstring d = pr.substr(0, pr.find_last_of(L"\\/")); DWORD a = GetFileAttributesW(d.c_str());
+      bool missing = a == INVALID_FILE_ATTRIBUTES, sav = GetFileAttributesW((d + L"__saving").c_str()) != INVALID_FILE_ATTRIBUTES, prv = GetFileAttributesW((d + L"__previous").c_str()) != INVALID_FILE_ATTRIBUTES;
+      if (missing && (sav || prv)) { logf("last project folder missing after an interrupted save: %s", logic::utf8(d).c_str());
+        std::wstring m = L"The last save of\n" + d + L"\nwas interrupted (power loss?). Your scans are safe:\n\n" + (sav ? L"New copy:  " + d + L"__saving\n" : L"") + (prv ? L"Previous copy:  " + d + L"__previous\n" : L"") + L"\nTo use the new copy, rename the folder \"" + logic::leafOf(d) + L"__saving\" to \"" + logic::leafOf(d) + L"\" in Explorer, then open it. Or tell the support channel.";
+        MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONWARNING); } } }
   if (cmd && *cmd) { std::wstring p = cmd; if (p.size() > 2 && p.front() == L'"') p = p.substr(1, p.size() - 2); openPath(p); }   // review A9: Busy while loading (no recording meanwhile)
   MSG msg; while (GetMessageW(&msg, nullptr, 0, 0)) {
     if (msg.message == WM_MOUSEWHEEL) { POINT p; GetCursorPos(&p); HWND w = WindowFromPoint(p); if (w && w != panel::hwnd && GetParent(w) == panel::hwnd) msg.hwnd = panel::hwnd; }   // wheel over a slider/checkbox scrolls the Scan panel (Studio), it does not move the control (found 2 Nov T29)

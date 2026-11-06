@@ -103,7 +103,7 @@ static bool notify(HWND owner, NMHDR* n) {
     if ((p->uNewState & LVIS_SELECTED) && !(p->uOldState & LVIS_SELECTED)) { view::selectedScan = scanAt(p->iItem); showProps(); } return true; }
   case NM_CLICK: { auto* p = (NMITEMACTIVATE*)n; bool ctrl = GetKeyState(VK_CONTROL) < 0, alt = GetKeyState(VK_MENU) < 0; if (p->iItem >= 0 && ((ctrl && alt) || (ctrl && p->iSubItem == 0 && p->ptAction.x < 20))) { int si = scanAt(p->iItem); if (si >= 0) onlyThis(si); } return true; }
   case LVN_COLUMNCLICK: { auto* p = (NMLISTVIEW*)n; sortBy(p->iSubItem); return true; }
-  case LVN_ENDLABELEDITW: { auto* p = (NMLVDISPINFOW*)n; if (!p->item.pszText || !*p->item.pszText) return true; std::wstring t = p->item.pszText; while (!t.empty() && t.front() == L' ') t.erase(t.begin()); int si = scanAt(p->item.iItem), gi = groupAt(p->item.iItem);
+  case LVN_ENDLABELEDITW: { auto* p = (NMLVDISPINFOW*)n; if (!p->item.pszText || !*p->item.pszText) return true; std::wstring t = p->item.pszText; while (!t.empty() && t.front() == L' ') t.erase(t.begin()); if (t.size() > 200) { t.resize(200); notice(L"Names are limited to 200 characters; the name was shortened."); }   /* DeepSeek 6 */ int si = scanAt(p->item.iItem), gi = groupAt(p->item.iItem);
     if (!editOk()) { refresh(); return true; } { std::lock_guard<std::mutex> l(g_scanMx); if (si >= 0) setScanName(g_scans[si], t); else if (gi >= 0) g_groups[gi].name = t; } g_dirty = true; refresh(); showProps(); return true; }
   case LVN_KEYDOWN: { auto* p = (NMLVKEYDOWN*)n; bool ctrl = GetKeyState(VK_CONTROL) < 0, alt = GetKeyState(VK_MENU) < 0;
     if (p->wVKey == VK_DELETE) { deleteSelected(owner); return true; } if (p->wVKey == VK_F2) { rename(); return true; } if (p->wVKey == VK_SPACE) { toggleHighlighted(); return true; }

@@ -63,9 +63,9 @@ static void logf(const char* fmt, ...) {
   char b[2048]; va_list a; va_start(a, fmt); vsnprintf(b, sizeof b, fmt, a); va_end(a);
   SYSTEMTIME t; GetLocalTime(&t); char line[2100]; snprintf(line, sizeof line, "%02d:%02d:%02d  %s", t.wHour, t.wMinute, t.wSecond, b);
   if (g_log) { fprintf(g_log, "%s\n", line); fflush(g_log); }
-  wchar_t w[2100]; mbstowcs(w, line, 2099); std::lock_guard<std::mutex> l(g_logMx); g_logLines.push_back(w); if (g_logLines.size() > 200) g_logLines.pop_front();
+  wchar_t w[2100]; if (!MultiByteToWideChar(CP_UTF8, 0, line, -1, w, 2100)) mbstowcs(w, line, 2099);   // DeepSeek 3: UTF-8 (Kannada names) std::lock_guard<std::mutex> l(g_logMx); g_logLines.push_back(w); if (g_logLines.size() > 200) g_logLines.pop_front();
 }
-static int sdkHook(int lvl, const wchar_t* m) { if (lvl <= 1) { char b[1024]; wcstombs(b, m, 1023); logf("[sdk] %s", b); } return 0; }
+static int sdkHook(int lvl, const wchar_t* m) { if (lvl <= 1) { char b[1024]; if (!WideCharToMultiByte(CP_UTF8, 0, m, -1, b, 1024, nullptr, nullptr)) { wcstombs(b, m, 1023); b[1023] = 0; } logf("[sdk] %s", b); } return 0; }   // DeepSeek 3
 
 static void mul44(const double A[4][4], const double B[4][4], double out[4][4]) { for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) { double s = 0; for (int k = 0; k < 4; k++) s += A[i][k] * B[k][j]; out[i][j] = s; } }
 static void invRigid(const double M[4][4], double out[4][4]) {   // inverse of a rotation+translation matrix
@@ -145,7 +145,8 @@ struct GroupRec { std::wstring name; bool visible = true; };
 // ---------------------------------------------------------------- settings (UI thread writes, SDK threads read)
 struct Settings {
   int tracking = 0;              // 0 geometry+texture, 1 geometry
-  bool distColor = true, autoAlign = false, hidePanel = false, recordTexture = true, flash = true, autoBright = true, audio = true;
+  std::atomic<bool> distColor{true};   // read on the scanning and tidy-up threads (DeepSeek 2)
+  bool autoAlign = false, hidePanel = false, recordTexture = true, flash = true, autoBright = true, audio = true;
   bool scanUsingAutoAlign = true;   // Settings > Scan > "Scan using auto-alignment" (default on)
   int shotBg = 0;                   // screenshot background: 0 white, 1 black
   std::atomic<float> nearMm{170.f}, farMm{330.f};
@@ -580,7 +581,7 @@ static void runPositionSearch() {
           // image scales", in the log since 10:46) and leaves them at the origin, so "found" was a no-op. Hard reject.
           if (share < 0.3f || med > 2.5f) { logf("position search #%d (local resume, window %zu): texture join rejected - probe surface %.0f%% on the window, median %.1f mm", g_searchTries + 1, a + 1, share * 100, med); continue; }
           logf("position search #%d (local resume, scan %d window %zu): FOUND in %.1f s, ref frames %d, probe frames %d, surface %.0f%% within 6 mm median %.1f mm (cameras %.0f mm apart)", ++g_searchTries, win.scan + 1, a + 1, secs, nr, np, share * 100, med, dist);
-          if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+          if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }   /* DeepSeek 1: inside the generation check */
           g_hybridNext = 0; g_lastSearch = clk::now(); searchDone(gen); return; }
         if (tried) logf("position search #%d (local resume, pass %d): texture join not found; trying the geometry auto-align against that pass", g_searchTries + 1, latest + 1); }
       // geometry auto-align (the method that joined Trail13 after Stop) against the latest visible pass only, then the same surface gate on its tail windows
@@ -599,13 +600,13 @@ static void runPositionSearch() {
         if (wpts.size() >= 300 && ppts.size() >= 60) { flat = logic::planeRms(wpts); feat::Grid g; g.build(std::move(wpts), 2.0f); double I[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, z[3] = {0, 0, 0}; g.check(ppts, I, z, 6.0f, share, med); } }
       logic::GateResult gate = logic::acceptJoin(share, med, true, flat); bool ok = found && gate.ok;   // review D1: geometry-only placement refused on a near-flat window
       logf("position search #%d (local geometry auto-align vs pass %d): 0x%08X in %.1f s, probe frames %d -> %s (surface %.0f%% within 6 mm, median %.1f mm, window flatness %.1f mm)", ++g_searchTries, target + 1, (unsigned)ec, secs, probe->getSize(), ok ? "FOUND" : found ? gate.why : "not found", share * 100, med, flat);
-      if (ok) { if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+      if (ok) { if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); } }   /* DeepSeek 1 */
       out->release(); in->release(); probe->release(); g_lastSearch = clk::now(); searchDone(gen); return; }
     // 0) image-feature search (FS build): recognise the place the latest textured probe frame shows in any earlier pass
     if (g_featSearch) { double T[4][4]; int inl = 0, matches = 0, refScan = -1, refFrame = -1; double secs = 0;
       if (featureSearch(T, inl, matches, refScan, refFrame, secs)) {
         logf("position search #%d (image features): FOUND in %.1f s, %d inliers of %d matches, scan %d frame %d", ++g_searchTries, secs, inl, matches, refScan + 1, refFrame + 1);
-        if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+        if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }   /* DeepSeek 1: inside the generation check */
         g_hybridNext = 0; g_lastSearch = clk::now(); searchDone(gen); return; }
       else if (matches >= 0) logf("position search #%d (image features): not found in %.1f s (best %d inliers of %d matches)", g_searchTries + 1, secs, inl, matches); }
     // 1) hybrid resume (texture + geometry): two windows of an earlier pass per try, tail of the latest pass first
@@ -613,7 +614,7 @@ static void runPositionSearch() {
       if (texReady && !wins.empty()) { for (int a = 0; a < 2 && a < (int)wins.size(); a++) { const HybridWindow& win = wins[(g_hybridNext + a) % wins.size()];
           double T[4][4]; int nr = 0, np = 0; double secs = 0; if (hybridResume(win, T, nr, np, secs)) {
             logf("position search #%d (hybrid resume, scan %d window %d of %d): FOUND in %.1f s, ref frames %d, probe frames %d", ++g_searchTries, win.scan + 1, (g_hybridNext + a) % (int)wins.size() + 1, (int)wins.size(), secs, nr, np);
-            if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+            if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }   /* DeepSeek 1: inside the generation check */
             g_hybridNext = 0; g_lastSearch = clk::now(); searchDone(gen); return; } }
         g_hybridNext = (g_hybridNext + 2) % (int)wins.size(); } }
     // 2) geometry-only auto-align (RANSAC) of the probe against the thinned references
@@ -642,7 +643,7 @@ static void runPositionSearch() {
       (void)Rinv; (void)tmp; logic::livePose(Rin, Rout, Pout, T); bool anyMoved = false; for (int k = 0; k <= nref; k++) if (!isIdentity(out->getElement(k)->getScanTransformation().m)) anyMoved = true; found = anyMoved; }
     logf("position search #%d (%s): 0x%08X in %.1f s, probe frames %d, refs %d -> %s", ++g_searchTries, tier == 1 ? "recent scans" : tier == 2 ? "all scans" : "all scans, 120-frame references", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), probe->getSize(), nref, found ? "FOUND" : "not found");
     for (IScan* t : big) t->release();
-    if (found) { if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; } std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); }
+    if (found) { if (gen == g_searchGen.load()) { { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(g_liveT, T, sizeof T); } g_foundAt = g_storedFrames.load(); g_liveFound = true; std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); } }   /* DeepSeek 1 */
     out->release(); in->release(); probe->release(); g_lastSearch = clk::now(); searchDone(gen);
   });
 }
@@ -710,9 +711,10 @@ static void countScanStats(ScanRec& r) {
 static void setScanName(ScanRec& r, const std::wstring& nm) { r.name = nm; if (r.scan) r.scan->setName(nm.c_str()); }
 static std::wstring nextScanName() {
   std::wstring base = S.scanName.empty() ? L"Spider Scan" : S.scanName; int n = 1;
-  for (;;) { wchar_t b[128]; swprintf(b, 128, L"%s %d", base.c_str(), n); bool used = false; for (auto& s : g_scans) if (s.name == b) used = true; if (!used) return b; n++; }
+  std::vector<std::wstring> names; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) names.push_back(s.name); }   // DeepSeek 5: snapshot under the lock
+  for (;;) { wchar_t b[128]; swprintf(b, 128, L"%s %d", base.c_str(), n); bool used = false; for (auto& nm : names) if (nm == b) used = true; if (!used) return b; n++; }
 }
-static std::wstring uniqueName(const std::wstring& base) { std::wstring n = base; int k = 2; for (;;) { bool used = false; for (auto& s : g_scans) if (s.name == n) used = true; if (!used) return n; wchar_t b[160]; swprintf(b, 160, L"%s (%d)", base.c_str(), k++); n = b; } }
+static std::wstring uniqueName(const std::wstring& base) { std::vector<std::wstring> names; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) names.push_back(s.name); } std::wstring n = base; int k = 2; for (;;) { bool used = false; for (auto& nm : names) if (nm == n) used = true; if (!used) return n; wchar_t b[160]; swprintf(b, 160, L"%s (%d)", base.c_str(), k++); n = b; } }
 static bool waitPostProcess(double maxSecs); static void startPostProcess(IScan* s, bool optimise); static bool postIdle();
 static void duplicateScan(int i) {   // Studio: Duplicate → "Copy of <name>"
   if (i < 0 || i >= (int)g_scans.size() || !g_scans[i].scan) return; /* the Workspace allows this only when idle (editOk) */ IScan* c = nullptr; createSimilarScan(&c, g_scans[i].scan); if (!c) return; cloneScan(c, g_scans[i].scan);
@@ -989,14 +991,14 @@ static bool writeFileAtomic(const std::wstring& path, const std::string& bytes) 
 // Sidecar: groups are not part of the .sproj format. Review D4: "placed" (already joined) is saved; D5: each scan line
 // carries its frame count so a reopened project only takes a line that matches its scan.
 static bool saveGroups(const std::wstring& sproj) {
-  std::wstring w; wchar_t b[1200];
-  for (auto& g : g_groups) { swprintf(b, 1200, L"G\t%s\t%d\n", g.name.c_str(), g.visible ? 1 : 0); w += b; }
-  int i = 0; for (auto& sc : g_scans) { swprintf(b, 1200, L"S\t%d\t%s\t%d\t%d\t%d\t%.4f\t%d\t%d\n", i++, sc.name.c_str(), sc.group, sc.visible ? 1 : 0, sc.keyFrames, sc.maxErr, sc.placed ? 1 : 0, sc.scan ? sc.scan->getSize() : 0); w += b; }
+  std::wstring w; wchar_t b[4200];   // DeepSeek 6: names are limited to 200 characters at rename; room to spare
+  for (auto& g : g_groups) { swprintf(b, 4200, L"G\t%s\t%d\n", g.name.c_str(), g.visible ? 1 : 0); w += b; }
+  int i = 0; for (auto& sc : g_scans) { swprintf(b, 4200, L"S\t%d\t%s\t%d\t%d\t%d\t%.4f\t%d\t%d\n", i++, sc.name.c_str(), sc.group, sc.visible ? 1 : 0, sc.keyFrames, sc.maxErr, sc.placed ? 1 : 0, sc.scan ? sc.scan->getSize() : 0); w += b; }
   if (!writeFileAtomic(projDir(sproj) + L"\\artecrec-groups.txt", "\xEF\xBB\xBF" + logic::utf8(w))) { logf("groups file could not be written"); return false; } return true;
 }
 static void loadGroups(const std::wstring& sproj) {
-  FILE* f = _wfopen((projDir(sproj) + L"\\artecrec-groups.txt").c_str(), L"r, ccs=UTF-8"); if (!f) return; wchar_t line[1024]; g_groups.clear(); int skipped = 0;
-  while (fgetws(line, 1024, f)) { std::wstring s = line; while (!s.empty() && (s.back() == L'\n' || s.back() == L'\r')) s.pop_back(); std::vector<std::wstring> c; size_t p = 0;
+  FILE* f = _wfopen((projDir(sproj) + L"\\artecrec-groups.txt").c_str(), L"r, ccs=UTF-8"); if (!f) return; wchar_t line[4300]; g_groups.clear(); int skipped = 0;
+  while (fgetws(line, 4300, f)) { std::wstring s = line; while (!s.empty() && (s.back() == L'\n' || s.back() == L'\r')) s.pop_back(); std::vector<std::wstring> c; size_t p = 0;
     for (;;) { size_t q = s.find(L'\t', p); c.push_back(s.substr(p, q == std::wstring::npos ? std::wstring::npos : q - p)); if (q == std::wstring::npos) break; p = q + 1; }
     if (c.size() >= 3 && c[0] == L"G") { GroupRec g; g.name = c[1]; g.visible = c[2] == L"1"; g_groups.push_back(g); }
     else if (c.size() >= 5 && c[0] == L"S") { int i = _wtoi(c[1].c_str()); if (i >= 0 && i < (int)g_scans.size()) { auto& r = g_scans[i];
