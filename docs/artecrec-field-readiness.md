@@ -66,6 +66,13 @@ Measured on the field laptop, 15-minute pass (5,269 frames, D:\ArtecDiag\t_auto_
 | Global registration | 25 % after 30 min (about 2 h) | 120 s |
 | Auto-align, 2 scans | 89 s | 60 s (would have been cut) |
 
+## Installed 6 Nov ~17:55 (owner approved in advance; ArtecRec was closed)
+
+Commit `5cecaf3`: a pass joined live anchors the pass it joined (16:38 scan 1 moved 5.1 mm); stubs between a
+tracking loss and Stop are discarded (16:06/16:37 13- and 16-frame scans). artecrec.exe MD5
+9DEA2E7F95119D274C01C8A4FBF9F56B, artecrec-fs.exe F309515DB13B129A88E514B5D863542F. Previous build kept as
+D:\ArtecDiagrtecrec-prev-73049b5.exe. Tests 102/0/0.
+
 ## Still needing a field check (verified by code reading only)
 
 | Item | How the acceptance session or the trip shows it |
