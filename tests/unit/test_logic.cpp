@@ -416,4 +416,16 @@ TEST(sort_third_click_restores_initial_order, "R4-04") {
   std::vector<int> deleted = {40, 10}; pos = restoreOrder(deleted, initial); got.clear(); for (int p : pos) got.push_back(deleted[p]); CHECK(got == (std::vector<int>{10, 40}));
 }
 
+// ================================================================= autosave manifest (6 Nov)
+TEST(autosave_recoverable_after_last_save, "autosave") {
+  std::vector<std::wstring> L = {L"P\t1\tC:\\a\\pass-1-1\tSpider Scan 1\n", L"P\t2\tC:\\a\\pass-2-1\tSpider Scan 2\n", L"S\t20261106-101500\n", L"P\t3\tC:\\a\\pass-3-1\tSpider Scan 3\r\n", L"P\t3\tC:\\a\\pass-3-2\tSpider Scan 3\n", L"P\t4\tC:\\a\\pass-4-1\t\x0CAC\x0CC7\n"};
+  auto r = recoverablePasses(L); CHECK_EQ((int)r.size(), 2);
+  if (r.size() == 2) { CHECK_EQ(r[0].id, 3); CHECK(r[0].folder == L"C:\\a\\pass-3-2"); CHECK(r[1].name == L"\x0CAC\x0CC7"); }
+}
+TEST(autosave_nothing_after_save_or_discard, "autosave") {
+  CHECK(recoverablePasses({L"P\t1\tC:\\y\tA\n", L"S\t1\n"}).empty()); CHECK(recoverablePasses({L"P\t1\tC:\\y\tA\n", L"X\t1\n"}).empty());
+  CHECK(recoverablePasses({}).empty()); CHECK(recoverablePasses({L"\n", L"garbage\n", L"P\t1\n"}).empty());   // malformed lines are ignored
+  CHECK(autosaveDiskOk(8.0)); CHECK(!autosaveDiskOk(7.9));
+}
+
 int main(int argc, char** argv) { return tfw::run(argc, argv, "unit-logic"); }

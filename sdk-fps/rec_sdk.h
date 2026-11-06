@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 #include <deque>
+#include <map>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -729,7 +731,7 @@ static void duplicateScan(int i) {   // Studio: Duplicate → "Copy of <name>"
 // a lost-tracking restart is not delayed by it (08:12 test: 4.6 s freeze + display build on the UI thread).
 // The thread also builds the scan's display meshes; the UI thread only swaps the result in (WM_POSTDONE).
 #define WM_POSTDONE (WM_APP + 9)
-struct PostResult { IScan* src; IScan* res; IScan* ref; std::vector<FrameMesh> disp; float texAvg[3]; bool hasTexAvg; std::vector<FrameFeat> feats; };
+struct PostResult { bool fresh = false; /* a newly recorded pass (autosave it) */ IScan* src; IScan* res; IScan* ref; std::vector<FrameMesh> disp; float texAvg[3]; bool hasTexAvg; std::vector<FrameFeat> feats; };
 static std::vector<FrameFeat> buildFeats(IScan* s, int cap) {   // windows of 5 textured frames, step 3, at most `cap` windows, scan-local
   const int WIN = 5; std::vector<FrameFeat> out; std::vector<int> ti; for (int k = 0; k < s->getSize(); k++) { IFrameMesh* f = s->getElement(k); if (f && f->isTextured()) ti.push_back(k); }
   int nwin = (int)ti.size() >= WIN ? ((int)ti.size() - WIN) / 3 + 1 : 0; int stride = nwin > cap ? (nwin + cap - 1) / cap * 3 : 3; auto t0 = clk::now(); int kps = 0;
@@ -870,7 +872,7 @@ static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> i
         if (v.ok) { r->setScanTransformation(nT); logf("pass refinement: moved %.1f mm, turned %.2f deg, %.0f%% of points within 2 mm (residual %.2f mm), %.1f s", moved, rot, share * 100, rms, secs); }
         else { logf("pass refinement rejected: %s (moved %.1f mm, turned %.2f deg, %.0f%% matched); the pass keeps its live position", v.why, moved, rot, share * 100); g_alignMsg = std::wstring(L"a join could not be tightened - check it on screen"); } }
       else logf("pass refinement: no overlap found with the other scans (%.1f s)", std::chrono::duration<double>(clk::now() - tr).count()); } }
-  PostResult* pr = new PostResult(); pr->src = s; pr->res = r ? r : s; ScanRec tmp; tmp.scan = pr->res; buildScanDisplay(tmp); pr->disp = std::move(tmp.disp); memcpy(pr->texAvg, tmp.texAvg, sizeof pr->texAvg); pr->hasTexAvg = tmp.hasTexAvg; tmp.scan = nullptr;
+  PostResult* pr = new PostResult(); pr->fresh = optimise; pr->src = s; pr->res = r ? r : s; ScanRec tmp; tmp.scan = pr->res; buildScanDisplay(tmp); pr->disp = std::move(tmp.disp); memcpy(pr->texAvg, tmp.texAvg, sizeof pr->texAvg); pr->hasTexAvg = tmp.hasTexAvg; tmp.scan = nullptr;
   pr->ref = nf >= 3 ? buildRef(pr->res, 40) : nullptr;
   if (g_featSearch && nf >= 3) pr->feats = buildFeats(pr->res, 40);
   { std::lock_guard<std::mutex> l(item->m); if (item->abandoned) { if (pr->ref) pr->ref->release(); if (pr->res && pr->res != pr->src) pr->res->release(); pr->src->release(); delete pr; return; } item->done = true; g_postGate.leave(); }
@@ -888,11 +890,14 @@ static bool abandonStuckPost() { bool any = false; for (int lp = g_lostPosts.exc
   if (any) { logf("a scan's processing did not finish in 6 min: given up, the scan is kept as recorded"); g_optimising = g_postBusy.load() > 0; } return any; }
 static bool postIdle() { return g_postBusy.load() == 0; }
 static void rebuildMaster();
+static void autosaveScan(IScan* s, const std::wstring& name); static void autosaveRename(IScan* from, IScan* to); static void autosaveCovered(bool saved);
 static void onPostDone(PostResult* pr) {   // UI thread
-  { std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) if (rec.scan == pr->src) { if (pr->res != pr->src) { rec.scan->release(); rec.scan = pr->res; pr->res = nullptr; } rec.disp = std::move(pr->disp); memcpy(rec.texAvg, pr->texAvg, sizeof rec.texAvg); rec.hasTexAvg = pr->hasTexAvg; if (rec.ref) rec.ref->release(); rec.ref = pr->ref; pr->ref = nullptr; rec.feats = std::move(pr->feats); countScanStats(rec); break; } }
+  IScan* doneScan = nullptr; std::wstring doneName; bool fresh = pr->fresh;
+  { std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) if (rec.scan == pr->src) { if (pr->res != pr->src) { autosaveRename(rec.scan, pr->res); rec.scan->release(); rec.scan = pr->res; pr->res = nullptr; } doneScan = rec.scan; doneName = rec.name; rec.disp = std::move(pr->disp); memcpy(rec.texAvg, pr->texAvg, sizeof rec.texAvg); rec.hasTexAvg = pr->hasTexAvg; if (rec.ref) rec.ref->release(); rec.ref = pr->ref; pr->ref = nullptr; rec.feats = std::move(pr->feats); countScanStats(rec); break; } }
   bool changed = pr->res == nullptr;   // a replaced (fine-registered) scan modifies the project; a display/reference build alone does not
   if (pr->ref) pr->ref->release(); if (pr->res && pr->res != pr->src) pr->res->release(); pr->src->release(); delete pr; rebuildMaster(); if (changed) g_dirty = true;
   if (g_postBusy.load() > 0) g_postBusy--; g_optimising = g_postBusy.load() > 0;
+  if (fresh && doneScan) autosaveScan(doneScan, doneName);   // autosave: the finished pass, in the background
 }
 // Called on the UI thread when the scanning job has ended: move recorded scans into the master model.
 static int onJobDone() {
@@ -972,6 +977,7 @@ static void runAutoAlign(bool manual = false) {   // aligns the visible scans to
     out->release(); in->release();
     if (gen == g_alignGen.load()) {   // not abandoned: apply, then rebuild the moved scans' display outside the lock
       for (auto& mv : moves) { ScanRec tmp; { std::lock_guard<std::mutex> l(g_scanMx); if (gen != g_alignGen.load()) break; /* R2-02: abandoned meanwhile - apply nothing more */ bool still = false; for (auto& r : g_scans) if (r.scan == mv.s) { r.scan->setScanTransformation(mv.T); r.placed = true; still = true; } /* cloud review: aligned = anchor, so a later auto-align does not move it again */ if (!still) continue; }
+        { std::wstring nm; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.scan == mv.s) nm = r.name; } if (!nm.empty()) autosaveScan(mv.s, nm); }   // autosave the new position
         tmp.scan = mv.s; buildScanDisplay(tmp); { std::lock_guard<std::mutex> l(g_scanMx); if (gen == g_alignGen.load()) for (auto& r : g_scans) if (r.scan == mv.s) { r.disp = std::move(tmp.disp); memcpy(r.texAvg, tmp.texAvg, sizeof r.texAvg); r.hasTexAvg = tmp.hasTexAvg; } } tmp.scan = nullptr; }
       wchar_t m[96]; if (ec == ErrorCode_OK) swprintf(m, 96, L"aligned in %.0f s", secs); else if (ec == ErrorCode_OperationFailed) wcscpy(m, L"could not align the new scan (too little overlap)"); else if (ec == ErrorCode_OperationAborted) wcscpy(m, L"auto-align gave up after 60 s (too little overlap?)"); else swprintf(m, 96, L"align failed (0x%08X)", (unsigned)ec);
       if (gen == g_alignGen.load()) { g_alignMsg = std::wstring(m); PostMessageW(g_hwnd, WM_ALIGNDONE, (WPARAM)gen, 0); } }
@@ -1084,12 +1090,26 @@ static bool saveProject(const std::wstring& sproj) {
       logf("could not move the new project folder in (error %lu); old folder %s", e, back ? "restored" : "NOT restored"); return false; }
     if (hadPrev) removeDir(older); }
   bool markerOk = writeFileAtomic(dir + L"\\artecrec-project.txt", "Saved by ArtecRec. This folder holds one project; ArtecRec may replace it when the project is saved again.\r\n");   // DeepSeek 2-3
+  autosaveCovered(true);   // the passes are in the saved project now
   if (!markerOk) { logf("project marker file could not be written"); notice(L"Saved. A small ArtecRec marker file could not be written; the next save of this project may ask for a new name (the scans are fine)."); }
   if (!saveGroups(sproj)) notice(L"Saved. The ArtecRec names and groups could not be written (the scans are fine; names and groups will be lost on reopening)."); else if (!writeStudioNames(sproj)) notice(L"Saved. The scan names could not all be written for Artec Studio; Studio will show its own names (the scans are fine)."); g_dirty = false; g_projPath = sproj; g_projForeign = false; g_replaceOk.clear(); return true;
 }
 static void clearProject() { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); g_projForeign = false; g_replaceOk.clear(); }   // DeepSeek 4-1: a replace confirmation never outlives its project
 // Review F5/A2/D4: the current project is cleared only after the new one loaded with at least one scan; a Studio project
 // with entries ArtecRec does not load is marked (never overwritten); loaded scans are anchors for later auto-aligns.
+// Loads the scans of a project into `out` (a new model the caller releases). Shared by Open and autosave recovery.
+static bool loadProjectScans(const std::wstring& sproj, IModel*& out, std::vector<std::wstring>& names, int& other, bool pumped) {
+  out = nullptr; names.clear(); other = 0; prj::IProject* p = nullptr; ErrorCode ec = prj::openProject(&p, sproj.c_str()); if (ec != ErrorCode_OK || !p) { logf("openProject 0x%08X", (unsigned)ec); g_saveErr = L"The file could not be read as an Artec project."; return false; }
+  int n = p->getEntryCount(); std::vector<Uuid> ids;
+  for (int i = 0; i < n; i++) { prj::EntryInfo e; IString* nm = nullptr; if (p->getEntry(i, &e, &nm) == ErrorCode_OK) { if (e.type == prj::EntryType_Scan) { ids.push_back(e.uuid); names.push_back(nm ? nm->getPointer() : L"Scan"); } else other++; } if (nm) nm->release(); }
+  if (ids.empty()) { p->release(); g_saveErr = L"This project has no scans that ArtecRec can open (it may hold only models). Your current project is unchanged."; return false; }
+  IArrayUuid* use = nullptr; createArrayUuid(&use, (int)ids.size()); for (int i = 0; i < (int)ids.size(); i++) use->setElement(i, ids[i]);
+  prj::ProjectLoaderSettings ls; ls.entryList = use; IJob* loader = nullptr; ec = p->createLoader(&loader, &ls); createModel(&out);
+  if (ec == ErrorCode_OK && loader) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = pumped ? runJobPumped(loader, &ws, L"Opening project...") : executeJob(loader, &ws); loader->release(); }
+  use->release(); p->release();
+  if (ec != ErrorCode_OK || out->getSize() == 0) { out->release(); out = nullptr; g_saveErr = L"The scans could not be loaded. Your current project is unchanged."; return false; }
+  return true;
+}
 static bool openProject(const std::wstring& sproj) {
   g_saveErr.clear(); prj::IProject* p = nullptr; ErrorCode ec = prj::openProject(&p, sproj.c_str()); if (ec != ErrorCode_OK || !p) { logf("openProject 0x%08X", (unsigned)ec); g_saveErr = L"The file could not be read as an Artec project."; return false; }
   int n = p->getEntryCount(); std::vector<Uuid> ids; std::vector<std::wstring> names; int other = 0;
@@ -1107,6 +1127,82 @@ static bool openProject(const std::wstring& sproj) {
   for (auto& r : g_scans) startPostProcess(r.scan, false);   // display meshes + search reference in the background (no re-registration of saved scans); at most 3 at once
   out->release(); rebuildMaster(); loadGroups(sproj); g_projPath = sproj; g_dirty = false; g_projForeign = other > 0; return true;
 }
+
+// ---------------------------------------------------------------- autosave (6 Nov, owner: "Studio has auto save and it
+// does not get in the way"). The SDK can only write whole projects, so each finished pass is saved ON ITS OWN, in the
+// background, as a small project of one scan: <exe dir>\Autosave\<session>\pass-<id>-<k>\pass.sproj. One low-priority
+// worker; only passes whose tidy-up has finished (never the pass being recorded); never the team's project folder;
+// paused while a Save or Open runs; skipped when the drive has under 8 GB free. A manifest records every saved pass. A
+// successful project save deletes the autosaved passes it now contains; a discarded project is marked. At the next start,
+// passes newer than the last save are offered for recovery.
+struct AutoItem { IScan* s; int id; std::wstring name; };
+static std::mutex g_autoMx; static std::condition_variable g_autoCv; static std::deque<AutoItem> g_autoQ; static bool g_autoRun = false;
+static std::wstring g_autoSession; static std::map<IScan*, int> g_autoId; static std::map<int, std::wstring> g_autoFolder; static int g_autoNextId = 1;
+static std::atomic<bool> g_autoBusy{false}; static std::atomic<int> g_autoSaved{0};
+static std::wstring exeDir() { wchar_t p[MAX_PATH]; GetModuleFileNameW(nullptr, p, MAX_PATH); std::wstring s = p; return s.substr(0, s.find_last_of(L"\\/")); }
+static std::wstring autosaveRoot() { return exeDir() + L"\\Autosave"; }
+static void appendManifest(const std::wstring& session, const std::wstring& line) {
+  std::string u = logic::utf8(line + L"\n"); FILE* f = _wfopen((session + L"\\autosave.txt").c_str(), L"ab"); if (!f) { logf("autosave manifest could not be written"); return; } fwrite(u.data(), 1, u.size(), f); fflush(f); fclose(f); }
+static std::wstring nowStamp() { SYSTEMTIME t; GetLocalTime(&t); wchar_t b[32]; swprintf(b, 32, L"%04d%02d%02d-%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond); return b; }
+static double driveFreeGB(const std::wstring& path) { ULARGE_INTEGER fb; if (GetDiskFreeSpaceExW(path.c_str(), &fb, nullptr, nullptr)) return fb.QuadPart / 1073741824.0; logf("autosave: free space could not be read (%lu)", GetLastError()); return 1e9; }   /* unknown = do not block autosave; the save itself fails if the drive is full */
+static void autosaveWorker() {
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL); bool diskWarned = false;
+  for (;;) { AutoItem it; std::wstring session;
+    { std::unique_lock<std::mutex> l(g_autoMx); g_autoCv.wait(l, [] { return !g_autoQ.empty(); }); it = g_autoQ.front(); g_autoQ.pop_front(); session = g_autoSession; }
+    while (g_mode.load() == M_Busy) std::this_thread::sleep_for(std::chrono::milliseconds(500));   // a Save/Open runs: wait
+    g_autoBusy = true; auto t0 = clk::now(); bool ok = false; std::wstring folder;
+    if (!logic::autosaveDiskOk(driveFreeGB(exeDir() + L"\\"))) { if (!diskWarned) { diskWarned = true; logf("autosave paused: under 8 GB free on the drive"); notice(L"Autosave is paused: the drive has under 8 GB free. Save the project and free some space."); } }
+    else { SHCreateDirectoryExW(nullptr, session.c_str(), nullptr); int k = 0; do { folder = session + L"\\pass-" + std::to_wstring(it.id) + L"-" + std::to_wstring(++k); } while (GetFileAttributesW(folder.c_str()) != INVALID_FILE_ATTRIBUTES);
+      SHCreateDirectoryExW(nullptr, folder.c_str(), nullptr); std::wstring sp = folder + L"\\pass.sproj";
+      prj::ProjectSettings ps; ps.path = sp.c_str(); prj::IProject* p = nullptr; ErrorCode ec = prj::createNewProject(&p, &ps);
+      if (ec == ErrorCode_OK && p) { prj::ProjectSaverSettings ss; ss.path = sp.c_str(); generateUuid(&ss.projectId); ss.compressionLevel = 0; IJob* saver = nullptr; ec = p->createSaver(&saver, &ss);
+        if (ec == ErrorCode_OK && saver) { IModel* m = nullptr; createModel(&m); m->add(it.s); AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = m; ws.threadsCount = std::max(1u, std::thread::hardware_concurrency() / 4); ec = execLimited(saver, &ws, 300, "autosave"); saver->release(); m->release(); ok = ec == ErrorCode_OK; }
+        p->release(); }
+      if (ok) { appendManifest(session, L"P\t" + std::to_wstring(it.id) + L"\t" + folder + L"\t" + it.name); std::wstring old;
+        { std::lock_guard<std::mutex> l(g_autoMx); if (session == g_autoSession) { auto f = g_autoFolder.find(it.id); if (f != g_autoFolder.end()) old = f->second; g_autoFolder[it.id] = folder; } }
+        if (!old.empty() && old != folder) removeDir(old); g_autoSaved++;
+        logf("autosave: pass \"%s\" saved in %.1f s", logic::utf8(it.name).c_str(), std::chrono::duration<double>(clk::now() - t0).count()); }
+      else { removeDir(folder); logf("autosave: pass \"%s\" could not be saved (0x%08X)", logic::utf8(it.name).c_str(), (unsigned)ec); } }
+    it.s->release(); g_autoBusy = false; }
+}
+// Queue a pass for autosave (UI or align thread). Holds its own reference until it is written.
+static void autosaveScan(IScan* s, const std::wstring& name) {
+  if (!s) return; std::lock_guard<std::mutex> l(g_autoMx);
+  if (g_autoSession.empty()) { g_autoSession = autosaveRoot() + L"\\" + nowStamp(); }
+  if (!g_autoRun) { g_autoRun = true; std::thread(autosaveWorker).detach(); }
+  int id; auto f = g_autoId.find(s); if (f != g_autoId.end()) id = f->second; else { id = g_autoNextId++; g_autoId[s] = id; }
+  for (auto it = g_autoQ.begin(); it != g_autoQ.end(); ++it) if (it->id == id) { it->s->release(); g_autoQ.erase(it); break; }   // only the latest state of a pass
+  s->addRef(); g_autoQ.push_back({s, id, name}); g_autoCv.notify_one(); }
+// The project was saved: its passes are in the project now; their autosaves go. Or the project was discarded.
+static void autosaveCovered(bool saved) {
+  std::wstring session; std::vector<std::wstring> folders;
+  { std::lock_guard<std::mutex> l(g_autoMx); session = g_autoSession; for (auto& f : g_autoFolder) folders.push_back(f.second); g_autoFolder.clear(); g_autoId.clear(); g_autoSession.clear();
+    for (auto& q : g_autoQ) q.s->release(); g_autoQ.clear(); }
+  if (session.empty()) return; appendManifest(session, std::wstring(saved ? L"S\t" : L"X\t") + nowStamp());
+  for (auto& f : folders) removeDir(f);
+  if (!g_autoBusy.load()) removeDir(session);   // a pass still being written is left to the start-up clean-up
+}
+// The scan swapped in by the tidy-up replaces the recorded one: keep the same autosave id.
+static void autosaveRename(IScan* from, IScan* to) { std::lock_guard<std::mutex> l(g_autoMx); auto f = g_autoId.find(from); if (f != g_autoId.end()) { int id = f->second; g_autoId.erase(f); g_autoId[to] = id; } }
+// At start: sessions with passes newer than their last save. Sessions fully covered are deleted.
+static std::vector<std::pair<std::wstring, std::vector<logic::AutoPass>>> autosaveRecoverable() {
+  std::vector<std::pair<std::wstring, std::vector<logic::AutoPass>>> res; std::wstring root = autosaveRoot();
+  for (auto& e : listFolder(root)) { if (!e.dir) continue; std::wstring session = root + L"\\" + e.name;
+    FILE* f = _wfopen((session + L"\\autosave.txt").c_str(), L"r, ccs=UTF-8"); std::vector<std::wstring> lines; if (f) { wchar_t line[2048]; while (fgetws(line, 2048, f)) lines.push_back(line); fclose(f); }
+    std::vector<logic::AutoPass> rec = logic::recoverablePasses(lines); std::vector<logic::AutoPass> keep;
+    for (auto& a : rec) if (GetFileAttributesW((a.folder + L"\\pass.sproj").c_str()) != INVALID_FILE_ATTRIBUTES) keep.push_back(a);
+    if (keep.empty()) { removeDir(session); logf("autosave: old session %s cleaned up", logic::utf8(e.name).c_str()); } else res.push_back({session, keep}); }
+  return res; }
+// Load recovered passes into the current (empty) project. They stay in the autosave until the project is saved.
+static int autosaveRecover(const std::wstring& session, const std::vector<logic::AutoPass>& passes) {
+  int added = 0;
+  for (auto& a : passes) { IModel* out = nullptr; std::vector<std::wstring> names; int other = 0; if (!loadProjectScans(a.folder + L"\\pass.sproj", out, names, other, true)) { logf("autosave: %s could not be loaded", logic::utf8(a.folder).c_str()); continue; }
+    for (int i = 0; i < out->getSize(); i++) { IScan* s = out->getElement(i); if (!s) continue; ScanRec r; r.scan = s; s->addRef(); r.placed = true; r.name = a.name.empty() ? L"Recovered scan" : a.name; s->setName(r.name.c_str()); countScanStats(r);
+      { std::lock_guard<std::mutex> l(g_scanMx); g_scans.push_back(std::move(r)); } startPostProcess(s, false); added++;
+      { std::lock_guard<std::mutex> l(g_autoMx); g_autoSession = session; g_autoId[s] = a.id; g_autoFolder[a.id] = a.folder; if (a.id >= g_autoNextId) g_autoNextId = a.id + 1; } }
+    out->release(); }
+  if (added) { rebuildMaster(); g_dirty = true; logf("autosave: %d pass(es) recovered from %s", added, logic::utf8(session).c_str()); }
+  return added; }
 
 static double fpsNow() { std::lock_guard<std::mutex> l(g_stmx); if (g_stamps.size() < 2) return 0; double s = std::chrono::duration<double>(g_stamps.back() - g_stamps.front()).count(); return s > 0.2 ? (g_stamps.size() - 1) / s : 0; }
 static double wsGB() { PROCESS_MEMORY_COUNTERS c; GetProcessMemoryInfo(GetCurrentProcess(), &c, sizeof c); return c.WorkingSetSize / 1073741824.0; }

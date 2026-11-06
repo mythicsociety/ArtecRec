@@ -202,6 +202,21 @@ template <class Id> inline std::vector<int> restoreOrder(const std::vector<Id>& 
   for (size_t i = 0; i < current.size(); i++) if (!used[i]) out.push_back((int)i);
   return out; }
 
+// ---------------------------------------------------------------- autosave manifest (6 Nov, per-pass background autosave)
+// One manifest per session: "P\t<id>\t<folder>\t<name>" a pass saved (a later P with the same id replaces it, e.g. after
+// auto-align moved the pass); "S\t<time>" the project was saved (everything before is covered); "X\t<time>" the user
+// discarded the project. Recoverable = the latest folder of every id seen after the last S or X.
+struct AutoPass { int id; std::wstring folder, name; };
+inline std::vector<std::wstring> splitTabs(const std::wstring& line) { std::vector<std::wstring> c; size_t p = 0; for (;;) { size_t q = line.find(L'\t', p); c.push_back(line.substr(p, q == std::wstring::npos ? std::wstring::npos : q - p)); if (q == std::wstring::npos) break; p = q + 1; } return c; }
+inline std::vector<AutoPass> recoverablePasses(const std::vector<std::wstring>& lines) {
+  std::vector<AutoPass> out;
+  for (auto line : lines) { while (!line.empty() && (line.back() == L'\r' || line.back() == L'\n')) line.pop_back(); if (line.empty()) continue;
+    std::vector<std::wstring> c = splitTabs(line);
+    if (c[0] == L"S" || c[0] == L"X") { out.clear(); continue; }
+    if (c[0] == L"P" && c.size() >= 4) { int id = _wtoi(c[1].c_str()); bool replaced = false; for (auto& a : out) if (a.id == id) { a.folder = c[2]; a.name = c[3]; replaced = true; } if (!replaced) out.push_back({id, c[2], c[3]}); } }
+  return out; }
+inline bool autosaveDiskOk(double freeGB) { return freeGB >= 8.0; }   // never fill the drive the projects are saved on
+
 // ---------------------------------------------------------------- pause/resume segments (C6)
 // One entry per recorded segment, in the order the SDK returns the scans.
 struct SegmentPose { bool found; double T[4][4]; int keyFrames = 0; double maxErr = 0; };   // + per-segment stats for the Workspace columns

@@ -91,7 +91,7 @@ static bool doSave(bool as, bool closing = false) {
   if (m == M_Aligning || !postIdle()) { if (g_pendingSave) { notice(L"A save is already waiting."); return false; } g_pendingSave = true; g_pendingSavePath = target; notice(L"Will save as soon as the scans are finished processing..."); logf("save queued until the scans are processed"); return false; }
   return doSaveNow(target);
 }
-static bool confirmDiscard(bool closing = false) { if (!g_dirty) return true; int r = MessageBoxW(g_hwnd, L"Save the project first?", APP, MB_YESNOCANCEL | MB_ICONWARNING); if (r == IDCANCEL) return false; if (r == IDYES) { bool had = g_pendingSave; bool ok = doSave(false, closing); if (!ok && closing && g_pendingSave && !had) { g_pendingClose = true; notice(L"ArtecRec will save and then close once the scans are processed."); return false; } return ok; } return true; }
+static bool confirmDiscard(bool closing = false) { if (!g_dirty) return true; int r = MessageBoxW(g_hwnd, L"Save the project first?", APP, MB_YESNOCANCEL | MB_ICONWARNING); if (r == IDCANCEL) return false; if (r == IDYES) { bool had = g_pendingSave; bool ok = doSave(false, closing); if (!ok && closing && g_pendingSave && !had) { g_pendingClose = true; notice(L"ArtecRec will save and then close once the scans are processed."); return false; } return ok; } autosaveCovered(false); return true; }   /* No = discard: its autosave goes too */
 static void doNew() { if (!logic::allowed(logic::A_New, g_mode.load(), !postIdle(), g_stuck)) { notice(L"Wait until the scans are finished processing."); return; } if (!confirmDiscard()) return; clearProject(); view::selectedScan = -1; ws::refresh(); ws::showProps(); g_firstScan = true; }
 static void openPath(const std::wstring& p) { g_mode = M_Busy; SetCursor(LoadCursor(nullptr, IDC_WAIT)); bool ok = openProject(p); g_mode = M_Idle; SetCursor(LoadCursor(nullptr, IDC_ARROW));
   if (!ok) { std::wstring m = L"Could not open the project.\n\n" + (g_saveErr.empty() ? std::wstring(L"See artecrec.log.") : g_saveErr); MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONERROR); return; }
@@ -110,17 +110,42 @@ static void updateStatus() {
   if (g_pendingSave && m == M_Idle) ms = L"Will save when the scans are processed...";
   swprintf(b, 512, L"%.1f fps\r\n\r\nSurfaces recorded: %ld\r\nRecording time: %d:%02d\r\nRegistration failures: %ld   %s\r\n\r\n%s\r\n%s", (m == M_Idle) ? 0.0 : fps, shown, (int)secs / 60, (int)secs % 60, g_regFail.load(), g_alignMsg.get().c_str(), ms, nt.c_str());
   panel::setStatus(b); panel::enableForMode(m);
-  wchar_t sb[640]; swprintf(sb, 640, L"  Build %hs %hs   |   Free RAM: %.0f MB   |   Total memory in use: %.0f MB   |   %s%s%s%s", __DATE__, __TIME__, freeGB() * 1024, wsGB() * 1024, m == M_Idle ? L"Ready" : ms, g_dirty ? L"   |   NOT SAVED" : L"", nt.empty() ? L"" : L"   |   ", nt.c_str()); SetWindowTextW(g_statusBar, sb);
+  const wchar_t* temp = !g_scanner ? L"Scanner: not connected" : g_overheated.load() ? L"Scanner temperature: TOO HOT - let it cool" : L"Scanner temperature: normal";   // the SDK reports only overheated / back to normal, no degrees
+  wchar_t sb[720]; swprintf(sb, 720, L"  Build %hs %hs   |   %s   |   Free RAM: %.0f MB   |   Total memory in use: %.0f MB   |   %s%s%s%s", __DATE__, __TIME__, temp, freeGB() * 1024, wsGB() * 1024, m == M_Idle ? L"Ready" : ms, g_dirty ? L"   |   NOT SAVED" : L"", nt.empty() ? L"" : L"   |   ", nt.c_str()); SetWindowTextW(g_statusBar, sb);
   if (g_showLog) { std::wstring t; { std::lock_guard<std::mutex> l(g_logMx); size_t n = g_logLines.size(); for (size_t i = n > 5 ? n - 5 : 0; i < n; i++) { t += g_logLines[i]; t += L"\r\n"; } } static std::wstring lastT; if (t != lastT) { SetWindowTextW(g_logBox, t.c_str()); lastT = t; } }
 }
+// Panels (owner, 6 Nov): every panel collapses with a caret and is resized by dragging its edge; sizes are remembered.
+static int g_pwUser = 380, g_wwUser = 500, g_logHUser = 86; static bool g_colPanel = false, g_colWs = false, g_colLog = false;
+static HWND g_capPanel = nullptr, g_capWs = nullptr, g_capLog = nullptr; static const int CAP = 26, GAP = 6;
+enum { SPL_NONE, SPL_PANEL, SPL_WS, SPL_LOG }; static int g_drag = SPL_NONE; static RECT g_splPanel = {}, g_splWs = {}, g_splLog = {};
+static std::wstring layoutIni() { return panel::iniPath(); }
+static void saveLayout() { std::wstring f = layoutIni(); auto wi = [&](const wchar_t* k, int v) { wchar_t b[16]; swprintf(b, 16, L"%d", v); WritePrivateProfileStringW(L"layout", k, b, f.c_str()); };
+  wi(L"panelW", g_pwUser); wi(L"workspaceW", g_wwUser); wi(L"logH", g_logHUser); wi(L"panelCollapsed", g_colPanel); wi(L"workspaceCollapsed", g_colWs); wi(L"logCollapsed", g_colLog); WritePrivateProfileStringW(nullptr, nullptr, nullptr, f.c_str()); }
+static void loadLayout() { std::wstring f = layoutIni(); auto ri = [&](const wchar_t* k, int d) { return (int)GetPrivateProfileIntW(L"layout", k, d, f.c_str()); };
+  g_pwUser = ri(L"panelW", 380); g_wwUser = ri(L"workspaceW", 500); g_logHUser = ri(L"logH", 86); g_colPanel = ri(L"panelCollapsed", 0) != 0; g_colWs = ri(L"workspaceCollapsed", 0) != 0; g_colLog = ri(L"logCollapsed", 0) != 0; }
 static void layout() {
-  RECT r; GetClientRect(g_hwnd, &r); int W = r.right, H = r.bottom, sbH = 24, logH = g_showLog ? 86 : 0, pw = g_showPanel ? 380 : 0, ww = g_showWs ? 500 : 0;
-  MoveWindow(g_statusBar, 0, H - sbH, W, sbH, TRUE); ShowWindow(g_logBox, g_showLog ? SW_SHOW : SW_HIDE); if (g_showLog) MoveWindow(g_logBox, pw, H - sbH - logH, W - pw - ww, logH, TRUE);
-  ShowWindow(panel::hwnd, g_showPanel ? SW_SHOW : SW_HIDE); if (g_showPanel) MoveWindow(panel::hwnd, 0, 0, pw, H - sbH, TRUE);
-  ShowWindow(ws::hwnd, g_showWs ? SW_SHOW : SW_HIDE); if (g_showWs) MoveWindow(ws::hwnd, W - ww, 0, ww, H - sbH, TRUE);
-  view::fullView = g_fullView; if (g_fullView) { sbH = 0; ShowWindow(g_statusBar, SW_HIDE); } else ShowWindow(g_statusBar, SW_SHOW);
-  MoveWindow(g_view, pw, 0, W - pw - ww, H - sbH - logH, TRUE);
+  RECT r; GetClientRect(g_hwnd, &r); int W = r.right, H = r.bottom; int sbH = g_fullView ? 0 : 24; view::fullView = g_fullView; ShowWindow(g_statusBar, g_fullView ? SW_HIDE : SW_SHOW); MoveWindow(g_statusBar, 0, H - sbH, W, sbH, TRUE);
+  bool sp = g_showPanel, sw = g_showWs, sl = g_showLog;
+  int pw = !sp ? 0 : g_colPanel ? CAP : std::max(220, std::min(g_pwUser, W / 2)), ww = !sw ? 0 : g_colWs ? CAP : std::max(220, std::min(g_wwUser, W / 2));
+  int gl = sp && !g_colPanel ? GAP : 0, gr = sw && !g_colWs ? GAP : 0; int vx = pw + gl, vw = std::max(100, W - pw - gl - ww - gr);
+  int logBody = sl && !g_colLog ? std::max(40, std::min(g_logHUser, (H - sbH) / 2)) : 0, logArea = sl ? CAP + logBody : 0, glog = sl && !g_colLog ? GAP : 0;
+  int colH = H - sbH;
+  // left: caret row on top, the Scan panel below it
+  ShowWindow(g_capPanel, sp ? SW_SHOW : SW_HIDE); if (sp) { MoveWindow(g_capPanel, 0, 0, pw, CAP, TRUE); SetWindowTextW(g_capPanel, g_colPanel ? L"\u25B6" : L"\u25C0  Scan"); }
+  ShowWindow(panel::hwnd, sp && !g_colPanel ? SW_SHOW : SW_HIDE); if (sp && !g_colPanel) MoveWindow(panel::hwnd, 0, CAP, pw, colH - CAP, TRUE);
+  // right: caret row on top, the Workspace below it
+  ShowWindow(g_capWs, sw ? SW_SHOW : SW_HIDE); if (sw) { MoveWindow(g_capWs, W - ww, 0, ww, CAP, TRUE); SetWindowTextW(g_capWs, g_colWs ? L"\u25C0" : L"Workspace  \u25B6"); }
+  ShowWindow(ws::hwnd, sw && !g_colWs ? SW_SHOW : SW_HIDE); if (sw && !g_colWs) MoveWindow(ws::hwnd, W - ww, CAP, ww, colH - CAP, TRUE);
+  // bottom of the middle: caret row, then the log
+  ShowWindow(g_capLog, sl ? SW_SHOW : SW_HIDE); if (sl) { MoveWindow(g_capLog, vx, colH - logArea, vw, CAP, TRUE); SetWindowTextW(g_capLog, g_colLog ? L"\u25B2  Log" : L"\u25BC  Log"); }
+  ShowWindow(g_logBox, sl && !g_colLog ? SW_SHOW : SW_HIDE); if (sl && !g_colLog) MoveWindow(g_logBox, vx, colH - logBody, vw, logBody, TRUE);
+  int vh = std::max(100, colH - logArea - glog); MoveWindow(g_view, vx, 0, vw, vh, TRUE);
+  g_splPanel = sp && !g_colPanel ? RECT{pw, 0, pw + GAP, colH} : RECT{}; g_splWs = sw && !g_colWs ? RECT{W - ww - GAP, 0, W - ww, colH} : RECT{}; g_splLog = sl && !g_colLog ? RECT{vx, vh, vx + vw, vh + GAP} : RECT{};
 }
+static int splitterAt(POINT p) { if (PtInRect(&g_splPanel, p)) return SPL_PANEL; if (PtInRect(&g_splWs, p)) return SPL_WS; if (PtInRect(&g_splLog, p)) return SPL_LOG; return SPL_NONE; }
+static void dragSplitter(POINT p) { RECT r; GetClientRect(g_hwnd, &r); int W = r.right, H = r.bottom - (g_fullView ? 0 : 24);
+  if (g_drag == SPL_PANEL) g_pwUser = std::max(220, std::min((int)p.x, W / 2)); else if (g_drag == SPL_WS) g_wwUser = std::max(220, std::min(W - (int)p.x, W / 2)); else if (g_drag == SPL_LOG) g_logHUser = std::max(40, std::min(H - CAP - (int)p.y - GAP, H / 2));
+  layout(); }
 static void buildMenu() {
   g_menu = CreateMenu(); HMENU f = CreatePopupMenu(), e = CreatePopupMenu(), cur = CreatePopupMenu(), v = CreatePopupMenu(), sv = CreatePopupMenu(), rm = CreatePopupMenu(), bf = CreatePopupMenu(), cm = CreatePopupMenu(), w = CreatePopupMenu(), st = CreatePopupMenu(), sb = CreatePopupMenu(), h = CreatePopupMenu();
   AppendMenuW(f, MF_STRING, IDM_NEW, L"New project\tCtrl+N"); AppendMenuW(f, MF_STRING, IDM_OPEN, L"Open project…\tCtrl+O"); AppendMenuW(f, MF_STRING, IDM_SAVE, L"Save project\tCtrl+S"); AppendMenuW(f, MF_STRING, IDM_SAVEAS, L"Save project as…"); AppendMenuW(f, MF_SEPARATOR, 0, nullptr); AppendMenuW(f, MF_STRING, IDM_EXIT, L"Exit");
@@ -266,6 +291,10 @@ static void jobDone(int gen) {
 static LRESULT CALLBACK wndProc(HWND h, UINT u, WPARAM wp, LPARAM lp) {
   switch (u) {
   case WM_SIZE: layout(); return 0;
+  case WM_SETCURSOR: { POINT p; GetCursorPos(&p); ScreenToClient(h, &p); int sa = g_drag != SPL_NONE ? g_drag : splitterAt(p); if ((HWND)wp == h && sa != SPL_NONE) { SetCursor(LoadCursor(nullptr, sa == SPL_LOG ? IDC_SIZENS : IDC_SIZEWE)); return TRUE; } break; }
+  case WM_LBUTTONDOWN: { POINT p = {(short)LOWORD(lp), (short)HIWORD(lp)}; g_drag = splitterAt(p); if (g_drag != SPL_NONE) SetCapture(h); return 0; }
+  case WM_MOUSEMOVE: if (g_drag != SPL_NONE) { POINT p = {(short)LOWORD(lp), (short)HIWORD(lp)}; dragSplitter(p); } return 0;
+  case WM_LBUTTONUP: if (g_drag != SPL_NONE) { g_drag = SPL_NONE; ReleaseCapture(); saveLayout(); } return 0;
   case WM_TIMER: onTimer(); return 0;
   case WM_JOBDONE: jobDone((int)wp); return 0;
   case WM_POSTDONE: onPostDone((PostResult*)lp); ws::refresh(); ws::showProps(); if (g_fitOnPost) { g_fitOnPost = false; view::fit(); view::setHome(); } view::wantRedraw = true; return 0;
@@ -286,6 +315,7 @@ static LRESULT CALLBACK wndProc(HWND h, UINT u, WPARAM wp, LPARAM lp) {
   case WM_COMMAND: {
     HWND c = (HWND)lp; int id = LOWORD(wp);
     if (!c) { command(id); return 0; }
+    if (c == g_capPanel) { g_colPanel = !g_colPanel; layout(); saveLayout(); SetFocus(view::hwnd); return 0; } if (c == g_capWs) { g_colWs = !g_colWs; layout(); saveLayout(); SetFocus(view::hwnd); return 0; } if (c == g_capLog) { g_colLog = !g_colLog; layout(); saveLayout(); SetFocus(view::hwnd); return 0; }
     if (c == panel::bPreview) doPreview(); else if (c == panel::bRecord) doRecord(); else if (c == panel::bStop) doStop(); else if (c == panel::bAdv) panel::toggleAdvanced();
     else if (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == EN_CHANGE) { panel::readSettings(); applyLiveSettings(); panel::saveIni(); }
     updateStatus(); return 0; }
@@ -320,6 +350,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   g_view = CreateWindowW(L"ArtecRecGL", L"", WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, g_hwnd, nullptr, hi, nullptr); view::init(g_view);
   g_logBox = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 10, 10, g_hwnd, nullptr, hi, nullptr); SendMessageW(g_logBox, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
   g_statusBar = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 10, 10, g_hwnd, nullptr, hi, nullptr); SendMessageW(g_statusBar, WM_SETFONT, (WPARAM)g_font, TRUE);
+  for (HWND* c : {&g_capPanel, &g_capWs, &g_capLog}) { *c = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_LEFT, 0, 0, 10, 10, g_hwnd, nullptr, hi, nullptr); SendMessageW(*c, WM_SETFONT, (WPARAM)g_fontB, TRUE); }   // panel carets
+  loadLayout();
   buildMenu(); syncMenu(); layout(); updateStatus(); ShowWindow(g_hwnd, SW_SHOWMAXIMIZED); SetTimer(g_hwnd, 1, 40, nullptr);
   if (!scannerOk) startReconnect();
   // DeepSeek 4: a save interrupted by a power loss between its two folder moves leaves the project folder missing, with
@@ -330,7 +362,14 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
       if (missing && (sav || prv)) { logf("last project folder missing after an interrupted save: %s", logic::utf8(d).c_str());
         std::wstring m = L"The last save of\n" + d + L"\nwas interrupted (power loss?). Your scans are safe:\n\n" + (sav ? L"New copy:  " + d + L"__saving\n" : L"") + (prv ? L"Previous copy:  " + d + L"__previous\n" : L"") + L"\nTo use the new copy, rename the folder \"" + logic::leafOf(d) + L"__saving\" to \"" + logic::leafOf(d) + L"\" in Explorer, then open it. Or tell the support channel.";
         MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONWARNING); } } }
-  if (cmd && *cmd) { std::wstring p = cmd; if (p.size() > 2 && p.front() == L'"') p = p.substr(1, p.size() - 2); openPath(p); }   // review A9: Busy while loading (no recording meanwhile)
+  bool autosaveTest = false; std::wstring cmdl = cmd ? cmd : L""; { size_t at = cmdl.find(L"--autosave-test"); if (at != std::wstring::npos) { autosaveTest = true; cmdl.erase(at, 15); } cmdl.erase(std::remove(cmdl.begin(), cmdl.end(), L'"'), cmdl.end()); while (!cmdl.empty() && (cmdl.back() == L' ' || cmdl.back() == L'	')) cmdl.pop_back(); while (!cmdl.empty() && cmdl.front() == L' ') cmdl.erase(cmdl.begin()); }
+  // autosave recovery: passes recorded after the last save of a session that did not end normally
+  if (cmdl.empty()) { auto rec = autosaveRecoverable(); for (auto& r : rec) { int n = (int)r.second.size();
+      std::wstring q = L"ArtecRec did not close normally last time.\n\n" + std::to_wstring(n) + L" pass(es) recorded after the last save were autosaved (" + logic::leafOf(r.first) + L").\n\nLoad them now? Then save the project.\n\nNo = keep them and ask again next time.";
+      if (MessageBoxW(g_hwnd, q.c_str(), APP, MB_YESNO | MB_ICONQUESTION) == IDYES) { int got = autosaveRecover(r.first, r.second); ws::refresh(); ws::showProps(); view::fit(); view::setHome(); g_firstScan = false; notice(std::to_wstring(got) + L" pass(es) recovered. Save the project now."); }
+      break; } }
+  if (!cmdl.empty()) { std::wstring p = cmdl; if (p.size() > 2 && p.front() == L'"') p = p.substr(1, p.size() - 2); openPath(p); }   // review A9: Busy while loading (no recording meanwhile)
+  if (autosaveTest) { int n = 0; for (auto& sc : g_scans) { autosaveScan(sc.scan, sc.name); n++; } logf("autosave test: %d pass(es) queued", n); }   // review A9: Busy while loading (no recording meanwhile)
   MSG msg; while (GetMessageW(&msg, nullptr, 0, 0)) {
     if (msg.message == WM_MOUSEWHEEL) { POINT p; GetCursorPos(&p); HWND w = WindowFromPoint(p); if (w && w != panel::hwnd && GetParent(w) == panel::hwnd) msg.hwnd = panel::hwnd; }   // wheel over a slider/checkbox scrolls the Scan panel (Studio), it does not move the control (found 2 Nov T29)
     if (msg.message == WM_KEYDOWN) { wchar_t cls[32] = L""; GetClassNameW(msg.hwnd, cls, 32); bool edit = !_wcsicmp(cls, L"Edit"); if ((!edit || GetKeyState(VK_CONTROL) < 0 || msg.wParam == VK_F7 || msg.wParam == VK_F11) && hotkey(msg.wParam)) continue; }

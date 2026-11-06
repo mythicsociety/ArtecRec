@@ -225,6 +225,43 @@ TEST(sys_log_failure_signatures, "B1 B3 A1") {
   for (const char* sig : {"could not move the old project folder", "could not move the new project folder", "Stop did not finish", "the scanning job did not end", "auto-align did not end in 90 s", "did not finish in 6 min", "createSaver 0x", "createNewProject 0x"}) CHECK_MSG(!has(l, sig), std::string("log contains: ") + lineWith(l, sig));
   NOTE("log: " + narrow(LOG()) + " (" + std::to_string(countOf(l, "\n")) + " lines)");
 }
+// ---------------------------------------------------------------- autosave (6 Nov): each finished pass is saved on its own in the
+// background; after a crash the passes are offered at the next start; a discarded project removes them.
+static std::wstring autosaveSession() { std::wstring root = SYS() + L"\\Autosave"; WIN32_FIND_DATAW f; HANDLE h = FindFirstFileW((root + L"\\*").c_str(), &f); std::wstring found;
+  if (h != INVALID_HANDLE_VALUE) { do { if (f.cFileName[0] != L'.' && (f.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) found = root + L"\\" + f.cFileName; } while (FindNextFileW(h, &f)); FindClose(h); } return found; }
+TEST(sys_autosave_writes_passes_in_background, "autosave") {
+  if (!exists(EXE()) || !exists(PROJ())) SKIP("sys_prepare did not run"); killApp(); removeDir(SYS() + L"\\Autosave");
+  std::string why; if (!launch(PROJ() + L" --autosave-test", why)) { killApp(); CHECK_MSG(false, why); return; } resetSample();
+  if (!waitLog("autosave test: 7 pass(es) queued", 240)) { CHECK(alive()); killApp(); SKIP("project did not open / no autosave test line within 240 s"); }
+  CHECK_MSG(!has(sessionLog(), "autosave paused"), lineWith(sessionLog(), "autosave paused")); bool all = waitLog("autosave: pass \"", 600, 7); CHECK_MSG(all, "expected 7 'autosave: pass ... saved' lines within 600 s, got " + std::to_string(countOf(sessionLog(), "autosave: pass \"")));
+  NOTE(lineWith(sessionLog(), "autosave: pass \""));
+  std::wstring ses = autosaveSession(); CHECK_MSG(!ses.empty(), "no autosave session folder"); if (ses.empty()) { killApp(); return; }
+  std::string man = readFile(ses + L"\\autosave.txt"); CHECK_EQ(countOf(man, "P\t"), 7); int folders = 0;
+  for (int id = 1; id <= 7; id++) if (exists(ses + L"\\pass-" + std::to_wstring(id) + L"-1\\pass.sproj")) folders++; CHECK_EQ(folders, 7);
+  CHECK_RESPONSIVE("while autosaving 7 passes in the background"); CHECK(alive());
+  killApp();   // a crash: the passes must survive
+  CHECK_MSG(exists(ses + L"\\autosave.txt"), "the autosave was lost when the app was killed");
+}
+TEST(sys_autosave_recovered_after_crash, "autosave") {
+  killApp();
+  std::wstring ses = autosaveSession(); if (ses.empty()) SKIP("no autosave session from the previous test");
+  std::string why; if (!launch(L"", why)) { killApp(); CHECK_MSG(false, why); return; }
+  HWND d = waitDialog(30); CHECK_MSG(d != nullptr, "no recovery question at start"); if (!d) { killApp(); return; }
+  std::wstring t = dialogText(d); NOTE(narrow(t)); CHECK_MSG(t.find(L"did not close normally") != std::wstring::npos && t.find(L"7 pass") != std::wstring::npos, "unexpected text: " + narrow(t));
+  clickButton(d, IDYES); waitGone(d, 5);
+  CHECK_MSG(waitLog("autosave: 7 pass(es) recovered", 300), "the 7 passes were not recovered within 300 s");
+  int n = listCount(); CHECK_MSG(n >= 7, "Workspace rows after recovery: " + std::to_string(n));
+  std::wstring boxes; double took = 0; bool ok = exitApp(60, boxes, took);   // answers "Save first?" with No = discard
+  CHECK_MSG(ok, "did not exit"); CHECK_MSG(boxes.find(L"Save the project first") != std::wstring::npos, "recovered passes did not mark the project as unsaved; boxes: " + narrow(boxes));
+  std::string man = readFile(ses + L"\\autosave.txt"); CHECK_MSG(!exists(ses) || has(man, "X\t"), "a discarded project kept its autosave as recoverable");
+  killApp();
+}
+TEST(sys_autosave_no_question_after_discard, "autosave") {
+  killApp();
+  std::string why; if (!launch(L"", why)) { killApp(); CHECK_MSG(false, why); return; }
+  HWND d = waitDialog(12); if (d) NOTE("box: " + narrow(dialogText(d))); CHECK_MSG(d == nullptr || dialogText(d).find(L"did not close normally") == std::wstring::npos, "recovery offered again after the project was discarded");
+  killApp();
+}
 TEST(sys_cleanup, "setup") { killApp(); NOTE("left for inspection: " + narrow(SYS()) + " (delete by hand)"); }
 
 int main(int argc, char** argv) { int r = tfw::run(argc, argv, "system"); killApp(); return r; }
