@@ -654,7 +654,7 @@ static void runPositionSearch() {
 // Display frames: every textured frame (up to 60, so the texture shows as in Studio) plus evenly spaced geometry frames.
 // Texture camera of the scanner: uv = P X / (P3 X) for X in frame coordinates. The camera is rigid to the scanner, so
 // one fit (11-parameter DLT on a textured frame's points + uv, normal equations) serves every frame of every scan.
-static double g_camP[3][4]; static bool g_camOk = false; static std::mutex g_camMx;
+static double g_camP[3][4]; static std::atomic<bool> g_camOk{false}; static std::mutex g_camMx;   // g_camOk read by tidy-up threads without the lock (DeepSeek 4-3)
 static bool fitCamera(const IFrameMesh* f) {
   IArrayPoint3F* pts = f->getPoints(); IArrayUVCoordinates* uvs = f->getUVCoordinates(); if (!pts || !uvs || uvs->getSize() != pts->getSize() || pts->getSize() < 500) return false;
   int n = pts->getSize(); const Point3F* p = pts->getPointer(); const UVCoordinates* u = uvs->getPointer(); int step = n > 4000 ? n / 4000 : 1;
@@ -1084,7 +1084,7 @@ static bool saveProject(const std::wstring& sproj) {
   if (!markerOk) { logf("project marker file could not be written"); notice(L"Saved. A small ArtecRec marker file could not be written; the next save of this project may ask for a new name (the scans are fine)."); }
   if (!saveGroups(sproj)) notice(L"Saved. The ArtecRec names and groups could not be written (the scans are fine; names and groups will be lost on reopening)."); else if (!writeStudioNames(sproj)) notice(L"Saved. The scan names could not all be written for Artec Studio; Studio will show its own names (the scans are fine)."); g_dirty = false; g_projPath = sproj; g_projForeign = false; g_replaceOk.clear(); return true;
 }
-static void clearProject() { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); g_projForeign = false; }
+static void clearProject() { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); g_projForeign = false; g_replaceOk.clear(); }   // DeepSeek 4-1: a replace confirmation never outlives its project
 // Review F5/A2/D4: the current project is cleared only after the new one loaded with at least one scan; a Studio project
 // with entries ArtecRec does not load is marked (never overwritten); loaded scans are anchors for later auto-aligns.
 static bool openProject(const std::wstring& sproj) {
