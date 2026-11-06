@@ -70,10 +70,10 @@ static double truthMoved = -1, truthShare = 0; static bool truthOk = false;
 // D:\ArtecReplay\models\<corpus folder>\*.ply|obj|stl. A pass is judged by the share of its points within 2 mm of it,
 // independent of the saved pass positions. The model's frame is checked against the saved passes first (and fitted
 // to them with ICP if it was exported in another frame).
-static pa::Model model; static bool haveModel = false; static double modelC[4][4]; static double modelFrameShare = 0, truthModelFit = -1; static int nModelOk = 0, nModelOff = 0;
+static pa::Model model; static bool haveModel = false, modelTried = false; static double modelC[4][4]; static double modelFrameShare = 0, truthModelFit = -1; static int nModelOk = 0, nModelOff = 0;
 static double shareOn(const std::vector<float>& P, float maxd) { int n = (int)P.size() / 3, hit = 0; for (int i = 0; i < n; i++) { float q[3] = {P[i * 3], P[i * 3 + 1], P[i * 3 + 2]}; if (!isIdentity(modelC)) { float x = (float)(modelC[0][0] * q[0] + modelC[0][1] * q[1] + modelC[0][2] * q[2] + modelC[0][3]), y = (float)(modelC[1][0] * q[0] + modelC[1][1] * q[1] + modelC[1][2] * q[2] + modelC[1][3]), z = (float)(modelC[2][0] * q[0] + modelC[2][1] * q[1] + modelC[2][2] * q[2] + modelC[2][3]); q[0] = x; q[1] = y; q[2] = z; } const float* pp; const float* nn; if (model.nearest(q, maxd, pp, nn)) hit++; } return n ? (double)hit / n : 0; }
 static bool loadModel() {
-  haveModel = false; setIdentity(modelC); model = pa::Model(); std::wstring corpusDir = projDir(projDir(g_projPath)); std::wstring mdir = L"D:\\ArtecReplay\\models\\" + logic::leafOf(corpusDir); std::wstring file;
+  haveModel = false; setIdentity(modelC); model = pa::Model(); std::wstring corpusDir = projDir(g_projPath);   /* the corpus folder holds the .sproj directly */ std::wstring mdir = L"D:\\ArtecReplay\\models\\" + logic::leafOf(corpusDir); std::wstring file;
   for (auto& e : listFolder(mdir)) { if (e.dir) continue; std::wstring l = e.name; for (auto& ch : l) ch = towlower(ch); if (l.size() > 4 && (l.compare(l.size() - 4, 4, L".ply") == 0 || l.compare(l.size() - 4, 4, L".obj") == 0 || l.compare(l.size() - 4, 4, L".stl") == 0)) { file = mdir + L"\\" + e.name; break; } }
   if (file.empty()) { logf("replay bench: no finished model for %s", logic::utf8(logic::leafOf(corpusDir)).c_str()); return false; }
   auto t0 = clk::now(); IMesh* mesh = nullptr; std::wstring l = file; for (auto& ch : l) ch = towlower(ch); ErrorCode ec;
@@ -85,9 +85,19 @@ static bool loadModel() {
   mesh->release(); if (model.pts.size() < 3000 * 3) { logf("replay bench: finished model too small"); return false; } model.build();
   // frame check: the saved passes against the model; if they do not sit on it, fit them to it (ICP) and keep that correction
   std::vector<float> P; { std::lock_guard<std::mutex> lk(g_scanMx); for (auto& rec : g_scans) if (rec.scan && rec.ref) pa::worldPts(rec.ref, 1, 10, false, P, nullptr, rec.scan->getScanTransformation().m); }
+  auto bbox = [](const std::vector<float>& V, double lo[3], double hi[3], double c[3]) { for (int a = 0; a < 3; a++) { lo[a] = 1e30; hi[a] = -1e30; c[a] = 0; } size_t n = V.size() / 3; for (size_t i = 0; i < n; i++) for (int a = 0; a < 3; a++) { double v = V[i * 3 + a]; if (v < lo[a]) lo[a] = v; if (v > hi[a]) hi[a] = v; c[a] += v; } if (n) for (int a = 0; a < 3; a++) c[a] /= n; };
+  double mlo[3], mhi[3], mc[3], plo[3], phi[3], pc[3]; bbox(model.pts, mlo, mhi, mc); bbox(P, plo, phi, pc);
+  double mdiag = sqrt((mhi[0] - mlo[0]) * (mhi[0] - mlo[0]) + (mhi[1] - mlo[1]) * (mhi[1] - mlo[1]) + (mhi[2] - mlo[2]) * (mhi[2] - mlo[2])), pdiag = sqrt((phi[0] - plo[0]) * (phi[0] - plo[0]) + (phi[1] - plo[1]) * (phi[1] - plo[1]) + (phi[2] - plo[2]) * (phi[2] - plo[2]));
+  logf("replay bench: finished model extent %.0f x %.0f x %.0f, centre (%.0f, %.0f, %.0f); saved passes extent %.0f x %.0f x %.0f, centre (%.0f, %.0f, %.0f)", mhi[0] - mlo[0], mhi[1] - mlo[1], mhi[2] - mlo[2], mc[0], mc[1], mc[2], phi[0] - plo[0], phi[1] - plo[1], phi[2] - plo[2], pc[0], pc[1], pc[2]);
+  if (mdiag > 0 && (pdiag / mdiag > 500 || mdiag / pdiag > 500)) { double k = pdiag / mdiag; for (auto& v : model.pts) v = (float)(v * k); logf("replay bench: finished model rescaled by %.0f (units)", k); model.build(); bbox(model.pts, mlo, mhi, mc); }
+  if (P.size() < 1500 * 3) { logf("replay bench: too few points from the saved passes to check the model frame"); return false; }
   modelFrameShare = shareOn(P, 2.0f);
-  if (modelFrameShare < 0.6 && P.size() >= 1500 * 3) { double R[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, t[3] = {0, 0, 0}; int matched = 0; double rms = 0; bool ok = true; for (int it = 0; it < 24 && ok; it++) ok = pa::step(P, model, R, t, it < 6 ? 40.0f : it < 12 ? 15.0f : it < 18 ? 6.0f : 2.0f, rms, matched);
-    if (ok) { for (int r = 0; r < 3; r++) { for (int c = 0; c < 3; c++) modelC[r][c] = R[r][c]; modelC[r][3] = t[r]; } double s2 = shareOn(P, 2.0f); logf("replay bench: finished model was in another frame; after fitting the saved passes to it: %.0f%% on the model (was %.0f%%)", s2 * 100, modelFrameShare * 100); modelFrameShare = s2; } }
+  if (modelFrameShare < 0.6 && P.size() >= 1500 * 3) { for (int a = 0; a < 3; a++) modelC[a][3] = mc[a] - pc[a];   /* centroid to centroid first, then ICP (the export may be re-centred) */ double R[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, t[3] = {0, 0, 0}; int matched = 0; double rms = 0; bool ok = true; for (int a = 0; a < 3; a++) t[a] = modelC[a][3];
+    std::vector<float> Pc; for (size_t i = 0; i < P.size() / 3; i += std::max<size_t>(1, P.size() / 3 / 6000)) { Pc.push_back(P[i * 3]); Pc.push_back(P[i * 3 + 1]); Pc.push_back(P[i * 3 + 2]); }   /* coarse: ~6,000 points at the wide radii */
+    for (int it = 0; it < 24 && ok; it++) ok = pa::step(Pc, model, R, t, it < 8 ? 150.0f : it < 16 ? 40.0f : 12.0f, rms, matched);
+    for (int it = 0; it < 12 && ok; it++) ok = pa::step(P, model, R, t, it < 6 ? 6.0f : 3.0f, rms, matched);
+    if (!ok) { setIdentity(modelC); logf("replay bench: the saved passes could not be fitted to the finished model (ICP found too little overlap)"); }
+    if (ok) { for (int r = 0; r < 3; r++) { for (int c = 0; c < 3; c++) modelC[r][c] = R[r][c]; modelC[r][3] = t[r]; } double s2 = shareOn(P, 2.0f); if (s2 < modelFrameShare) { setIdentity(modelC); s2 = shareOn(P, 2.0f); } logf("replay bench: finished model was in another frame; after fitting the saved passes to it: %.0f%% on the model (was %.0f%%)", s2 * 100, modelFrameShare * 100); modelFrameShare = s2; } }
   haveModel = modelFrameShare >= 0.6; logf("replay bench: finished model %s: %d points used, loaded in %.0f s; %.0f%% of the saved passes' points lie within 2 mm of it -> %s", logic::utf8(logic::leafOf(file)).c_str(), (int)model.pts.size() / 3, std::chrono::duration<double>(clk::now() - t0).count(), modelFrameShare * 100, haveModel ? "used as the reference" : "NOT used (the model does not match the project)");
   return haveModel; }   /* the saved position checked against the other passes before the run (owner, 7 Nov: "i am not sure all passes in those projects are already placed right") */
 static double dist(const double A[4][4], const double B[4][4]) { return sqrt((A[0][3] - B[0][3]) * (A[0][3] - B[0][3]) + (A[1][3] - B[1][3]) * (A[1][3] - B[1][3]) + (A[2][3] - B[2][3]) * (A[2][3] - B[2][3])); }
@@ -97,10 +107,11 @@ static void line(const std::string& s) { FILE* f = _wfopen(out.c_str(), L"ab"); 
 static double secs(clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); }
 static void finish() { active = false; char b[300]; snprintf(b, sizeof b, "replay bench done: %d run(s); joined ok %d, joined wrong %d, aligned ok %d, aligned wrong %d, not placed %d, anchors moved %d; saved position uncertain %d, no overlap as saved %d; on the finished model ok %d, off %d", run + 1, nOk, nWrong, nAligned, nAlignedWrong, nNot, nAnchorMoved, nUncertain, nNoOverlap, nModelOk, nModelOff); logf("%s", b); line(std::string("# ") + b); g_dirty = false; autosaveCovered(false); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }
 static void begin(const std::wstring& csv) { out = csv; active = true; phase = 0; run = -1; order.clear(); for (int i = 0; i < (int)g_scans.size(); i++) if (g_scans[i].scan && g_scans[i].scan->getSize() >= 20) order.push_back(i);
-  if (GetFileAttributesW(out.c_str()) == INVALID_FILE_ATTRIBUTES) line("project,scan,name,frames,fed,liveJoined,tries,joinSecs,errStopMm,errFinalMm,anchorsMovedMm,truthMovedMm,truthShare,modelFit,truthModelFit,result"); logf("replay bench: %d run(s) on %s", (int)order.size(), logic::utf8(g_projPath).c_str()); loadModel(); }
+  if (GetFileAttributesW(out.c_str()) == INVALID_FILE_ATTRIBUTES) line("project,scan,name,frames,fed,liveJoined,tries,joinSecs,errStopMm,errFinalMm,anchorsMovedMm,truthMovedMm,truthShare,modelFit,truthModelFit,result"); logf("replay bench: %d run(s) on %s", (int)order.size(), logic::utf8(g_projPath).c_str()); modelTried = false; }
 static void step() {
   int m = g_mode.load();
   if (phase == 0) { if (m != M_Idle || !postIdle() || g_pendingAlign) return;
+    if (!modelTried) { modelTried = true; loadModel(); }   /* now the search references of the saved passes exist */
     if (run + 1 >= (int)order.size()) { finish(); return; }
     run++; scanIdx = order[run]; if (scanIdx >= (int)g_scans.size() || !g_scans[scanIdx].scan) return;
     IScan* src = g_scans[scanIdx].scan; truth = src->getScanTransformation();
