@@ -31,7 +31,7 @@ further changes before the trip except for a critical defect.
 | Reconnect runs on the window thread | field evidence: 26 min of retries without a freeze | if the window freezes after a USB drop, wait 1 min, then power-cycle the scanner |
 | Scanner battery low shows as repeated USB drops | — | full battery each day; carry charger and adapter |
 | Memory on very large projects | warning at 16 GB free, recording refused below 6 GB | one project per stone; save often |
-| No timed autosave | status bar shows NOT SAVED; Save queues itself while processing | save after every 2–3 passes |
+| Autosave covers finished passes only | each finished pass autosaved in the background; recovery offered at start | still save after every 2–3 passes |
 
 ## Release candidate (6 Nov 09:17)
 
@@ -39,6 +39,17 @@ Tag `field-rc-2026-11-06` = commit `123e0e1`. Installed on the field laptop: D:\
 MD5 89612F7B5FB600F276760BBC78C81E2F (previous field build kept as D:\ArtecDiag\artecrec-prev-1211.exe).
 Review rounds applied after the first status above: cloud review (10), ChatGPT R1-R4, Gemini (7), DeepSeek 1-7
 (24 + 3). Tests: 84 passed, 0 failed, 0 skipped.
+
+## Installed 6 Nov ~12:40 (owner: "you can kill the app")
+
+Commit `122c782`: per-pass background autosave (D:\ArtecRec\Autosave, recovery offered at start),
+collapsible/resizable panels, scanner temperature state in the status bar. artecrec.exe MD5
+C5C0E5A2016DFF5916300E74C229F4E2, artecrec-fs.exe 3564E79AE6C38951B05879761AA6EEEA. Previous build kept as
+D:\ArtecDiag\artecrec-prev-0911.exe. Tests 89/0/0. The force-close dropped 3 unsaved passes (11:11-11:18),
+owner-approved. Field check: after the next crash or kill, the recovery question appears.
+
+Field finding 6 Nov: global registration hit its 120 s limit on 6 long passes (250-480 frames); measure the
+real time on the laptop and set the limit from it.
 
 ## Still needing a field check (verified by code reading only)
 
