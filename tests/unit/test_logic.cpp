@@ -428,4 +428,25 @@ TEST(autosave_nothing_after_save_or_discard, "autosave") {
   CHECK(autosaveDiskOk(8.0)); CHECK(!autosaveDiskOk(7.9));
 }
 
+// ================================================================= no time limits (6 Nov)
+TEST(watch_never_cancels_a_slow_step_on_time, "no-limit") {
+  CHECK_EQ(watchVerdict(false, 3600 * 5, 300, false), W_Run);   // a step without progress reports: never cancelled for taking long
+  CHECK_EQ(watchVerdict(true, 2, 300, false), W_Run);           // progress moving: runs, however long it has been
+  CHECK_EQ(watchVerdict(true, 299, 300, false), W_Run);
+}
+TEST(watch_cancels_on_hang_or_request, "no-limit") {
+  CHECK_EQ(watchVerdict(true, 301, 300, false), W_CancelStalled);   // progress stopped moving for 5 min = hung
+  CHECK_EQ(watchVerdict(false, 0, 300, true), W_CancelAsked); CHECK_EQ(watchVerdict(true, 0, 300, true), W_CancelAsked);
+  CHECK(!giveUpAfterCancel(59)); CHECK(giveUpAfterCancel(61));
+}
+TEST(ask_keep_waiting_only_when_stuck, "no-limit") {
+  CHECK(!askKeepWaiting(true, 10, 7200, 300));   // a 2-hour save that is still progressing: no question
+  CHECK(askKeepWaiting(true, 301, 400, 300));    // progress stopped for 5 min: ask
+  CHECK(!askKeepWaiting(false, 0, 899, 300)); CHECK(askKeepWaiting(false, 0, 901, 300));   // never reports: ask after 15 min
+}
+TEST(save_allowed_while_processing, "no-limit") {
+  CHECK(allowed(A_Save, M_Idle, true, false));   // Save is allowed while passes are processed
+  CHECK(!allowed(A_Open, M_Idle, true, false)); CHECK(!allowed(A_AutoAlign, M_Idle, true, false));
+}
+
 int main(int argc, char** argv) { return tfw::run(argc, argv, "unit-logic"); }

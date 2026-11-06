@@ -214,6 +214,81 @@ static void baseline(bool global) {
   NOTE(std::string(global ? "global" : "serial") + " registration uncancelled on scan " + std::to_string(big + 1) + " (" + std::to_string(s->getSize()) + " frames): " + ecName(ec) + " in " + tfw::str(t) + " s");
   CHECK_EQ(ec, ErrorCode_OK); CHECK(out->getSize() == 1 && out->getElement(0)->getSize() == s->getSize()); out->release(); in->release();
 }
+// 6 Nov (owner: "why should there be a limit at all?"): does each long SDK step report progress, and how often?
+// A step that reports can run as long as it needs and be given up only when its progress stops moving.
+#include <artec/sdk/base/IProgressInfo.h>
+#include <mutex>
+struct ProgRec : public artec::sdk::base::ProgressInfoBase { std::mutex m; clk::time_point last = clk::now(), start = clk::now(); double maxGap = 0; int reports = 0, pulses = 0, notifies = 0, lastCur = -1, lastTot = -1;
+  void tick() { auto n = clk::now(); double g = std::chrono::duration<double>(n - last).count(); if (g > maxGap) maxGap = g; last = n; }
+  void report(int c, int t) override { std::lock_guard<std::mutex> l(m); tick(); reports++; lastCur = c; lastTot = t; }
+  void pulse() override { std::lock_guard<std::mutex> l(m); tick(); pulses++; }
+  void notify(artec::sdk::base::DetailsInfo) override { std::lock_guard<std::mutex> l(m); tick(); notifies++; } };
+static void progressRun(int which) {   // 0 serial fine, 1 global, 2 auto-align of all scans
+  NEED_FIXTURE(); Loaded L; openProj(FIXPROJ(), L); if (!L.m || L.ec != ErrorCode_OK) SKIP("could not open the fixture");
+  int big = 0; for (int i = 1; i < L.m->getSize(); i++) if (L.m->getElement(i)->getSize() > L.m->getElement(big)->getSize()) big = i; IScan* s = L.m->getElement(big);
+  IModel* in = nullptr; createModel(&in); if (which == 2) { for (int i = 0; i < L.m->getSize(); i++) { ensureNormals(L.m->getElement(i)); in->add(L.m->getElement(i)); } }   /* = rec_sdk.h runAutoAlign */ else in->add(s); IModel* out = nullptr; createModel(&out); alg::IAlgorithm* a = nullptr;
+  if (which == 1) { alg::GlobalRegistrationSettings gd; gd.scannerType = s->getScannerType(); gd.registrationType = alg::GlobalRegistrationType_Geometry; alg::createGlobalRegistrationAlgorithm(&a, &gd); }
+  else if (which == 0) { alg::SerialRegistrationSettings sd; sd.scannerType = s->getScannerType(); sd.registrationType = alg::SerialRegistrationType_Fine; alg::createSerialRegistrationAlgorithm(&a, &sd); }
+  else { alg::AutoAlignSettings as; as.scannerType = s->getScannerType(); alg::createAutoalignAlgorithm(&a, &as); }
+  if (!a) { CHECK(false); return; } ProgRec* pr = new ProgRec(); AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.progress = pr; ws.threadsCount = std::thread::hardware_concurrency();
+  auto t0 = clk::now(); ErrorCode ec = executeJob(a, &ws); double t = since(t0); a->release(); double tailGap = std::chrono::duration<double>(clk::now() - pr->last).count(); if (tailGap > pr->maxGap) pr->maxGap = tailGap;
+  const char* nm = which == 0 ? "serial fine" : which == 1 ? "global" : "auto-align";
+  NOTE(std::string(nm) + " on " + (which == 2 ? std::to_string(in->getSize()) + " scans" : std::to_string(s->getSize()) + " frames") + ": " + ecName(ec) + " in " + tfw::str(t) + " s; progress reports " + std::to_string(pr->reports) + " (last " + std::to_string(pr->lastCur) + "/" + std::to_string(pr->lastTot) + "), pulses " + std::to_string(pr->pulses) + ", notifies " + std::to_string(pr->notifies) + ", longest silence " + tfw::str(pr->maxGap) + " s");
+  CHECK_EQ(ec, ErrorCode_OK);
+  /* ArtecRec relies on this: global registration and auto-align report progress (a hang is detected by silence); the SDK's
+     serial fine registration reports none (it is stopped only by Cancel). A change here changes how hangs are caught. */
+  if (which == 0) CHECK_MSG(pr->reports + pr->pulses + pr->notifies == 0, "serial fine now reports progress: it can get hang detection too");
+  else { CHECK_MSG(pr->reports + pr->pulses + pr->notifies > 0, std::string(nm) + " reported no progress at all"); CHECK_MSG(pr->maxGap < 60, std::string(nm) + ": progress silent for " + tfw::str(pr->maxGap) + " s"); }
+  pr->release(); out->release(); in->release();
+}
+TEST(progress_serial_registration, "no-limit") { progressRun(0); }
+TEST(progress_global_registration, "no-limit") { progressRun(1); }
+TEST(progress_auto_align, "no-limit") { progressRun(2); }
+// 6 Nov design: Save must not wait for a pass's clean-up. The saver then reads a scan while the surface optimisation
+// (serial fine registration) reads the same scan on another thread. Both only read their input; this checks it holds.
+TEST(save_while_registering, "no-limit") {
+  NEED_FIXTURE(); Loaded L; openProj(FIXPROJ(), L); if (!L.m || L.ec != ErrorCode_OK) SKIP("could not open the fixture");
+  int big = 0; for (int i = 1; i < L.m->getSize(); i++) if (L.m->getElement(i)->getSize() > L.m->getElement(big)->getSize()) big = i; IScan* s = L.m->getElement(big);
+  Matrix4x4D T0 = s->getScanTransformation(); int nf = s->getSize();
+  for (int round = 0; round < 3; round++) {
+    IModel* in = nullptr; createModel(&in); in->add(s); IModel* out = nullptr; createModel(&out); alg::IAlgorithm* a = nullptr;
+    alg::SerialRegistrationSettings sd; sd.scannerType = s->getScannerType(); sd.registrationType = alg::SerialRegistrationType_Fine; alg::createSerialRegistrationAlgorithm(&a, &sd);
+    if (!a) { CHECK(false); in->release(); out->release(); return; }
+    ErrorCode er = ErrorCode_OK; std::thread reg([&] { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); er = executeJob(a, &ws); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300 * round));   // start the save at different points of the registration
+    std::wstring sp = WORK() + L"\\concurrent\\r" + std::to_wstring(round) + L"\\c.sproj"; removeDir(WORK() + L"\\concurrent\\r" + std::to_wstring(round)); double secs = 0;
+    ErrorCode es = saveProj(L.m, sp, secs); reg.join(); a->release();
+    CHECK_EQ(es, ErrorCode_OK); CHECK_EQ(er, ErrorCode_OK); CHECK(out->getSize() == 1 && out->getElement(0)->getSize() == nf);
+    CHECK_EQ(s->getSize(), nf); CHECK(maxDiff(s->getScanTransformation(), T0) == 0);   // the input scan was not changed by the registration
+    Loaded B; openProj(sp, B); CHECK_EQ(B.ec, ErrorCode_OK); if (B.m) { CHECK_EQ(B.m->getSize(), EXPECT_SCANS); CHECK_EQ(totalFrames(B.m), EXPECT_FRAMES); }
+    NOTE("round " + std::to_string(round) + ": save " + ecName(es) + " in " + tfw::str(secs) + " s while the registration ran; registration " + ecName(er));
+    in->release(); out->release(); }
+  removeDir(WORK() + L"\\concurrent");
+}
+// Field measurement (run by hand: itest_sdk.exe measure_long_pass, with MEASURE_PROJ = a saved project, opened read-only,
+// never copied). Times the longest scan's surface optimisation and global registration, and auto-align of all scans, with
+// no time limit (global registration is stopped after MEASURE_MAX_MIN minutes, default 30, only to bound the measurement).
+TEST(measure_long_pass, "measure") {
+  std::wstring mp = envOr(L"MEASURE_PROJ", L""); if (mp.empty() || !exists(mp)) SKIP("set MEASURE_PROJ to a .sproj");
+  int maxMin = _wtoi(envOr(L"MEASURE_MAX_MIN", L"30").c_str()); Loaded L; openProj(mp, L); if (!L.m || L.ec != ErrorCode_OK) SKIP("could not open " + narrow(mp));
+  NOTE("opened " + std::to_string(L.m->getSize()) + " scans, " + std::to_string(totalFrames(L.m)) + " frames in " + tfw::str(L.secs) + " s");
+  int big = 0; for (int i = 1; i < L.m->getSize(); i++) if (L.m->getElement(i)->getSize() > L.m->getElement(big)->getSize()) big = i; IScan* s = L.m->getElement(big);
+  for (int which = 0; which < 2; which++) {
+    IModel* in = nullptr; createModel(&in); in->add(s); IModel* out = nullptr; createModel(&out); alg::IAlgorithm* a = nullptr;
+    if (which == 0) { alg::SerialRegistrationSettings sd; sd.scannerType = s->getScannerType(); sd.registrationType = alg::SerialRegistrationType_Fine; alg::createSerialRegistrationAlgorithm(&a, &sd); }
+    else { alg::GlobalRegistrationSettings gd; gd.scannerType = s->getScannerType(); gd.registrationType = alg::GlobalRegistrationType_Geometry; alg::createGlobalRegistrationAlgorithm(&a, &gd); }
+    ProgRec* pr = new ProgRec(); ICancellationTokenSource* cts = nullptr; createCancellationTokenSource(&cts);
+    AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.progress = pr; ws.cancellation = cts->getToken(); ws.threadsCount = std::thread::hardware_concurrency();
+    std::atomic<bool> fin{false}; std::thread wd([&] { for (int i = 0; i < maxMin * 600 && !fin.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(100)); if (!fin.load()) cts->cancel(); });
+    auto t0 = clk::now(); ErrorCode ec = executeJob(a, &ws); double t = since(t0); fin = true; wd.join(); a->release(); cts->release();
+    NOTE(std::string(which == 0 ? "surface optimisation (serial fine)" : "global registration") + " of scan " + std::to_string(big + 1) + " (" + std::to_string(s->getSize()) + " frames): " + ecName(ec) + " in " + tfw::str(t) + " s; progress " + std::to_string(pr->lastCur) + "/" + std::to_string(pr->lastTot) + ", longest silence " + tfw::str(pr->maxGap) + " s" + (ec == ErrorCode_OperationAborted ? " (stopped at the measurement cap)" : ""));
+    pr->release(); out->release(); in->release(); }
+  if (L.m->getSize() >= 2) { IModel* in = nullptr; createModel(&in); for (int i = 0; i < L.m->getSize(); i++) { ensureNormals(L.m->getElement(i)); in->add(L.m->getElement(i)); } IModel* out = nullptr; createModel(&out); alg::IAlgorithm* a = nullptr;
+    alg::AutoAlignSettings as; as.scannerType = s->getScannerType(); alg::createAutoalignAlgorithm(&a, &as); ProgRec* pr = new ProgRec(); AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.progress = pr; ws.threadsCount = std::thread::hardware_concurrency();
+    auto t0 = clk::now(); ErrorCode ec = executeJob(a, &ws); double t = since(t0); a->release();
+    NOTE("auto-align of " + std::to_string(in->getSize()) + " scans (" + std::to_string(totalFrames(in)) + " frames): " + ecName(ec) + " in " + tfw::str(t) + " s; longest progress silence " + tfw::str(pr->maxGap) + " s");
+    pr->release(); out->release(); in->release(); }
+}
 TEST(baseline_serial_registration, "timing") { baseline(false); }
 TEST(baseline_global_registration, "timing") { baseline(true); }
 TEST(flatness_of_real_windows, "D1") {

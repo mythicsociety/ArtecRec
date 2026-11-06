@@ -50,6 +50,8 @@ $FAILSIG = [ordered]@{
   "project could not be created/saved"                  = '^(createNewProject|createSaver) 0x'
   "project could not be opened"                         = '^openProject 0x'
   "cameras wedged: need a power cycle"                  = 'the cameras need a power cycle'
+  "a step hung: no progress, cancelled (6 Nov)"         = '\(stuck\), cancelled'
+  "a step ignored Cancel and was given up (6 Nov)"      = 'did not stop within 60 s of Cancel'
 }
 # warnings: worth a look, not a failure by themselves
 $WARNSIG = [ordered]@{
@@ -58,6 +60,7 @@ $WARNSIG = [ordered]@{
   "no frames from the scanner, capture restarted"       = '^no frames from the scanner in 6 s'
   "position not found during a scan"                    = '^position was not found during this scan'
   "scanner overheated"                                  = '^scanner overheated'
+  "processing cancelled by the user (pass kept as recorded)" = 'processing cancelled by the user|surface optimisation cancelled'
   "SDK error/warning lines"                             = '^\[sdk\]'
   "pass refinement found no overlap"                    = '^pass refinement: no overlap'
 }

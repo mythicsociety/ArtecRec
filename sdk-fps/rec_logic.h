@@ -202,6 +202,22 @@ template <class Id> inline std::vector<int> restoreOrder(const std::vector<Id>& 
   for (size_t i = 0; i < current.size(); i++) if (!used[i]) out.push_back((int)i);
   return out; }
 
+// ---------------------------------------------------------------- long steps without time limits (6 Nov, owner: "why
+// should there be a limit at all?"). A processing step runs as long as it needs. It is cancelled only when the user asks
+// (Cancel processing, closing, opening another project) or when it reports progress and the progress has stopped moving
+// for `stallSecs` (a hang). A step that never reports progress (the SDK's surface optimisation) is never cancelled on time.
+enum WatchVerdict { W_Run, W_CancelAsked, W_CancelStalled };
+inline WatchVerdict watchVerdict(bool reportsProgress, double silentSecs, double stallSecs, bool cancelAsked) {
+  if (cancelAsked) return W_CancelAsked;
+  if (reportsProgress && silentSecs > stallSecs) return W_CancelStalled;
+  return W_Run; }
+// A step that was asked to cancel and still has not returned after this long is given up (its result is thrown away).
+inline bool giveUpAfterCancel(double secsSinceCancel) { return secsSinceCancel > 60; }
+// Save/open (run with the window waiting): ask "keep waiting?" only when the job reports progress and it has stopped
+// moving for askSecs, or, for a job that never reports, after askSecs * 3.
+inline bool askKeepWaiting(bool reportsProgress, double silentSecs, double elapsedSecs, double askSecs) {
+  return reportsProgress ? silentSecs > askSecs : elapsedSecs > askSecs * 3; }
+
 // ---------------------------------------------------------------- autosave manifest (6 Nov, per-pass background autosave)
 // One manifest per session: "P\t<id>\t<folder>\t<name>" a pass saved (a later P with the same id replaces it, e.g. after
 // auto-align moved the pass); "S\t<time>" the project was saved (everything before is covered); "X\t<time>" the user

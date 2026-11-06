@@ -32,7 +32,7 @@ if /i "%LEVEL%"=="integration" goto do_integ
 goto end_integ
 :do_integ
 rem one process per test: a hung SDK job is killed with its process and the next test still runs
-set ITESTS=fixture_copy open_project_counts save_and_reopen_round_trip save_writes_only_project_files save_into_existing_folder kannada_names_in_sproj loaded_scan_names_match_sproj auto_align_two_scans_returns cancel_serial_registration cancel_global_registration cancel_global_before_start flatness_of_real_windows
+set ITESTS=fixture_copy open_project_counts save_and_reopen_round_trip save_writes_only_project_files save_into_existing_folder kannada_names_in_sproj loaded_scan_names_match_sproj auto_align_two_scans_returns cancel_serial_registration cancel_global_registration cancel_global_before_start flatness_of_real_windows progress_serial_registration progress_global_registration progress_auto_align save_while_registering
 if "%FULL%"=="1" set ITESTS=%ITESTS% baseline_serial_registration baseline_global_registration
 for %%t in (%ITESTS% cleanup_saved_copies) do call :runexe integration "%BIN%\itest_sdk.exe" %%t
 :end_integ

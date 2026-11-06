@@ -22,7 +22,7 @@ static double since(clk::time_point t) { return std::chrono::duration<double>(cl
 enum { IDM_NEW = 101, IDM_OPEN, IDM_SAVE, IDM_SAVEAS, IDM_EXIT, IDM_FIT, IDM_HOME, IDM_SETHOME, IDM_ORTHO, IDM_GRID, IDM_LIGHT, IDM_RANGE,
        IDM_RSOLID, IDM_RWIRE, IDM_RPOINTS, IDM_RWIRESOLID, IDM_RPOINTSSOLID, IDM_SMOOTH, IDM_FLAT, IDM_BF_SHOW, IDM_BF_CULL, IDM_BF_BLACK, IDM_BF_TRANS, IDM_COL_TEX, IDM_COL_SCAN, IDM_COL_SURF,
        IDM_VFRONT, IDM_VBACK, IDM_VLEFT, IDM_VRIGHT, IDM_VTOP, IDM_VBOTTOM, IDM_SHOT, IDM_CUR_MASS, IDM_CUR_ORIGIN,
-       IDM_SCANPANEL, IDM_WORKSPACE, IDM_LOG, IDM_AUDIO, IDM_AUTOALIGN, IDM_ZOOMCUR, IDM_SHOT_WHITE, IDM_SHOT_BLACK, IDM_ABOUT };
+       IDM_SCANPANEL, IDM_WORKSPACE, IDM_LOG, IDM_AUDIO, IDM_AUTOALIGN, IDM_ZOOMCUR, IDM_SHOT_WHITE, IDM_SHOT_BLACK, IDM_ABOUT, IDM_ALIGNNOW, IDM_GLOBALREG, IDM_CANCELPROC };
 
 // ---------------------------------------------------------------- paths and files
 static std::wstring envOr(const wchar_t* k, const std::wstring& d) { wchar_t b[1024]; DWORD n = GetEnvironmentVariableW(k, b, 1024); return n && n < 1024 ? std::wstring(b) : d; }
@@ -222,7 +222,7 @@ TEST(sys_exit_after_save, "B6 A4") {
 }
 TEST(sys_log_failure_signatures, "B1 B3 A1") {
   std::string l = logText(); if (l.empty()) SKIP("no log");
-  for (const char* sig : {"could not move the old project folder", "could not move the new project folder", "Stop did not finish", "the scanning job did not end", "auto-align did not end in 90 s", "did not finish in 6 min", "createSaver 0x", "createNewProject 0x"}) CHECK_MSG(!has(l, sig), std::string("log contains: ") + lineWith(l, sig));
+  for (const char* sig : {"could not move the old project folder", "could not move the new project folder", "Stop did not finish", "the scanning job did not end", "auto-align did not stop within 60 s of Cancel", "did not stop within 60 s of Cancel", "(stuck), cancelled", "createSaver 0x", "createNewProject 0x"}) CHECK_MSG(!has(l, sig), std::string("log contains: ") + lineWith(l, sig));
   NOTE("log: " + narrow(LOG()) + " (" + std::to_string(countOf(l, "\n")) + " lines)");
 }
 // ---------------------------------------------------------------- autosave (6 Nov): each finished pass is saved on its own in the
@@ -261,6 +261,42 @@ TEST(sys_autosave_no_question_after_discard, "autosave") {
   std::string why; if (!launch(L"", why)) { killApp(); CHECK_MSG(false, why); return; }
   HWND d = waitDialog(12); if (d) NOTE("box: " + narrow(dialogText(d))); CHECK_MSG(d == nullptr || dialogText(d).find(L"did not close normally") == std::wstring::npos, "recovery offered again after the project was discarded");
   killApp();
+}
+// ---------------------------------------------------------------- no time limits (6 Nov, owner: "why should there be a limit
+// at all?"): Save does not wait for passes being optimised; Cancel processing stops them; global registration runs from the
+// Edit menu and Esc cancels it.
+static bool startProcessing(std::string& why) { killApp(); if (!launch(PROJ() + L" --process-test", why)) return false; resetSample(); return waitLog("process test: 7 pass(es) being optimised", 240); }
+TEST(sys_save_while_processing, "no-limit") {
+  if (!exists(EXE()) || !exists(PROJ())) SKIP("sys_prepare did not run"); std::string why; if (!startProcessing(why)) { CHECK(alive()); killApp(); SKIP("no process-test line: " + why); }
+  int optBefore = countOf(sessionLog(), "surface optimisation (fine registration");
+  std::wstring dir = SYS() + L"\\proc"; removeDir(dir); SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr); std::string line; std::wstring boxes;
+  if (!saveAs(dir + L"\\Busy.sproj", 400, line, boxes, why)) { killApp(); SKIP("Save dialog not automatable: " + why); }
+  int optAtSave = countOf(sessionLog(), "surface optimisation (fine registration"); NOTE(line + "; passes optimised before the save " + std::to_string(optBefore) + ", when it ended " + std::to_string(optAtSave));
+  CHECK_MSG(has(line, "save 0x00000000"), "no successful save while processing: " + line + " " + narrow(boxes));
+  CHECK_MSG(!has(sessionLog(), "save queued until the scans are processed"), "the save waited for processing");
+  CHECK_MSG(optBefore < 7, "all passes were already optimised before the save started: the test did not overlap");
+  CHECK(exists(dir + L"\\Busy\\Busy.sproj")); CHECK_RESPONSIVE("saving while passes are optimised");
+  bool done = waitLog("surface optimisation (fine registration", 400, 7); CHECK_MSG(done, "not all 7 passes finished optimising after the save");
+  killApp();
+}
+TEST(sys_cancel_processing, "no-limit") {
+  if (!exists(EXE()) || !exists(PROJ())) SKIP("sys_prepare did not run"); std::string why; if (!startProcessing(why)) { CHECK(alive()); killApp(); SKIP("no process-test line: " + why); }
+  waitLog("surface optimisation", 60); postCmd(IDM_CANCELPROC);
+  CHECK_MSG(waitLog("processing cancelled by the user", 20), "no 'processing cancelled by the user' line");
+  auto t0 = clk::now(); bool quiet = false; while (since(t0) < 90) { std::string l = sessionLog(); if (countOf(l, "surface optimisation (fine registration") + countOf(l, "surface optimisation cancelled") >= 7) { quiet = true; break; } Sleep(500); }
+  NOTE("all passes stopped or finished " + tfw::str(since(t0)) + " s after Cancel; cancelled " + std::to_string(countOf(sessionLog(), "surface optimisation cancelled")));
+  CHECK_MSG(quiet, "passes still being processed 90 s after Cancel"); CHECK_MSG(!has(sessionLog(), "did not stop within 60 s of Cancel"), "a pass ignored Cancel");
+  CHECK(alive()); CHECK_RESPONSIVE("cancelling processing"); killApp();
+}
+TEST(sys_global_registration_esc_cancels, "no-limit") {
+  if (!exists(EXE()) || !exists(PROJ())) SKIP("sys_prepare did not run"); killApp(); std::string why; if (!launch(PROJ(), why)) { killApp(); CHECK_MSG(false, why); return; }
+  if (!waitLog("open 0x", 240) || !waitLog("search reference built", 180, 7)) { killApp(); SKIP("project did not open and settle"); } resetSample();
+  postCmd(IDM_GLOBALREG); Sleep(6000); PostMessageW(g_main, WM_KEYDOWN, VK_ESCAPE, 0);
+  HWND d = waitDialog(10); CHECK_MSG(d != nullptr, "Esc did not ask to cancel"); if (d) { NOTE(narrow(dialogText(d))); clickButton(d, IDYES); waitGone(d, 5); }
+  CHECK_MSG(waitLog("global registration cancelled", 60), "no 'global registration cancelled' line within 60 s of Esc");
+  NOTE(lineWith(sessionLog(), "global registration "));
+  int n = listCount(); CHECK_MSG(n == 7 || n == 8, "Workspace rows after the cancel: " + std::to_string(n));
+  CHECK(alive()); CHECK_RESPONSIVE("global registration (the window must keep answering)"); killApp();
 }
 TEST(sys_cleanup, "setup") { killApp(); NOTE("left for inspection: " + narrow(SYS()) + " (delete by hand)"); }
 

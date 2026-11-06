@@ -13,7 +13,7 @@ static const wchar_t* APP = L"ArtecRec by Mythic Society";
 enum { IDM_NEW = 101, IDM_OPEN, IDM_SAVE, IDM_SAVEAS, IDM_EXIT, IDM_FIT, IDM_HOME, IDM_SETHOME, IDM_ORTHO, IDM_GRID, IDM_LIGHT, IDM_RANGE,
        IDM_RSOLID, IDM_RWIRE, IDM_RPOINTS, IDM_RWIRESOLID, IDM_RPOINTSSOLID, IDM_SMOOTH, IDM_FLAT, IDM_BF_SHOW, IDM_BF_CULL, IDM_BF_BLACK, IDM_BF_TRANS, IDM_COL_TEX, IDM_COL_SCAN, IDM_COL_SURF,
        IDM_VFRONT, IDM_VBACK, IDM_VLEFT, IDM_VRIGHT, IDM_VTOP, IDM_VBOTTOM, IDM_SHOT, IDM_CUR_MASS, IDM_CUR_ORIGIN,
-       IDM_SCANPANEL, IDM_WORKSPACE, IDM_LOG, IDM_AUDIO, IDM_AUTOALIGN, IDM_ZOOMCUR, IDM_SHOT_WHITE, IDM_SHOT_BLACK, IDM_ABOUT, IDM_ALIGNNOW };
+       IDM_SCANPANEL, IDM_WORKSPACE, IDM_LOG, IDM_AUDIO, IDM_AUTOALIGN, IDM_ZOOMCUR, IDM_SHOT_WHITE, IDM_SHOT_BLACK, IDM_ABOUT, IDM_ALIGNNOW, IDM_GLOBALREG, IDM_CANCELPROC };
 static HWND g_view, g_statusBar, g_logBox; static bool g_showPanel = true, g_showWs = true, g_showLog = true; static HMENU g_menu;
 static bool g_fitOnPost = false, g_capRestart = false, g_capWedged = false; static int g_capRestarts = 0; static bool g_reconnect = false, g_reconnectAdvised = false; static clk::time_point g_reconnectStart, g_reconnectLast; static bool g_autoRestart = false, g_fullView = false, g_savedPanel = true, g_savedWs = true, g_savedLog = true; static clk::time_point g_lastBeep;
 static void layout(); static clk::time_point g_cdStart; static bool g_firstScan = true;
@@ -88,15 +88,15 @@ static bool doSave(bool as, bool closing = false) {
   int m = g_mode.load();
   if (m == M_Busy) { notice(L"Saving or opening is already running. Wait for it to finish."); return false; }   // second review: never queue from Busy (wrong project)
   if (m == M_Preview || m == M_Record || m == M_Paused || m == M_Stopping) { notice(L"Stop the scanner first, then save."); return false; }
-  if (m == M_Aligning || !postIdle()) { if (g_pendingSave) { notice(L"A save is already waiting."); return false; } g_pendingSave = true; g_pendingSavePath = target; notice(L"Will save as soon as the scans are finished processing..."); logf("save queued until the scans are processed"); return false; }
+  if (m == M_Aligning || cleaningNow()) { if (g_pendingSave) { notice(L"A save is already waiting."); return false; } g_pendingSave = true; g_pendingSavePath = target; notice(m == M_Aligning ? L"Will save as soon as auto-align has finished..." : L"Will save in a moment (a pass is being cleaned)..."); logf("save queued until %s", m == M_Aligning ? "auto-align has finished" : "frame cleaning has finished"); return false; }   /* 6 Nov: processing passes are saved as recorded */
   return doSaveNow(target);
 }
 static bool confirmDiscard(bool closing = false) { if (!g_dirty) return true; int r = MessageBoxW(g_hwnd, L"Save the project first?", APP, MB_YESNOCANCEL | MB_ICONWARNING); if (r == IDCANCEL) return false; if (r == IDYES) { bool had = g_pendingSave; bool ok = doSave(false, closing); if (!ok && closing && g_pendingSave && !had) { g_pendingClose = true; notice(L"ArtecRec will save and then close once the scans are processed."); return false; } return ok; } autosaveCovered(false); return true; }   /* No = discard: its autosave goes too */
-static void doNew() { if (!logic::allowed(logic::A_New, g_mode.load(), !postIdle(), g_stuck)) { notice(L"Wait until the scans are finished processing."); return; } if (!confirmDiscard()) return; clearProject(); view::selectedScan = -1; ws::refresh(); ws::showProps(); g_firstScan = true; }
+static void doNew() { if (!logic::allowed(logic::A_New, g_mode.load(), !postIdle(), g_stuck)) { notice(L"Passes are still being optimised. Wait, or use Edit > Cancel processing."); return; } if (!confirmDiscard()) return; clearProject(); view::selectedScan = -1; ws::refresh(); ws::showProps(); g_firstScan = true; }
 static void openPath(const std::wstring& p) { g_mode = M_Busy; SetCursor(LoadCursor(nullptr, IDC_WAIT)); bool ok = openProject(p); g_mode = M_Idle; SetCursor(LoadCursor(nullptr, IDC_ARROW));
   if (!ok) { std::wstring m = L"Could not open the project.\n\n" + (g_saveErr.empty() ? std::wstring(L"See artecrec.log.") : g_saveErr); MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONERROR); return; }
   view::selectedScan = -1; ws::refresh(); ws::showProps(); view::fit(); view::setHome(); g_firstScan = false; }
-static void doOpen() { if (!logic::allowed(logic::A_Open, g_mode.load(), !postIdle(), g_stuck)) { notice(L"Wait until the scans are finished processing."); return; } if (!confirmDiscard()) return; std::wstring p = askPath(false); if (p.empty()) return; openPath(p); }
+static void doOpen() { if (!logic::allowed(logic::A_Open, g_mode.load(), !postIdle(), g_stuck)) { notice(L"Passes are still being optimised. Wait, or use Edit > Cancel processing."); return; } if (!confirmDiscard()) return; std::wstring p = askPath(false); if (p.empty()) return; openPath(p); }
 
 // ---------------------------------------------------------------- UI
 static void updateStatus() {
@@ -107,7 +107,8 @@ static void updateStatus() {
   double secs = g_recSecs + (m == M_Record ? std::chrono::duration<double>(clk::now() - g_recStart).count() : 0); wchar_t b[512]; double fps = fpsNow();
   long shown = g_alignLive.load() ? (g_liveFound.load() ? g_frames.load() - g_foundAt.load() : 0) : g_frames.load();
   if (m == M_Record && g_alignLive.load() && !g_liveFound.load()) ms = g_searchZombie.load() ? L"Live joining paused (restart ArtecRec); recording continues" : L"Searching for position…";   // DeepSeek 3-4 if (m == M_Record && g_lostNow.load()) ms = S.scanUsingAutoAlign ? L"Searching for position…" : L"Tracking lost";
-  if (g_pendingSave && m == M_Idle) ms = L"Will save when the scans are processed...";
+  if (g_pendingSave && m == M_Idle) ms = L"Will save in a moment...";
+  static wchar_t proc[96]; if (m == M_Idle && !g_pendingSave) { int on = optimisingNow(); if (on > 0) { swprintf(proc, 96, L"Optimising %d pass(es)... (Edit > Cancel processing to stop)", on); ms = proc; } }
   swprintf(b, 512, L"%.1f fps\r\n\r\nSurfaces recorded: %ld\r\nRecording time: %d:%02d\r\nRegistration failures: %ld   %s\r\n\r\n%s\r\n%s", (m == M_Idle) ? 0.0 : fps, shown, (int)secs / 60, (int)secs % 60, g_regFail.load(), g_alignMsg.get().c_str(), ms, nt.c_str());
   panel::setStatus(b); panel::enableForMode(m);
   const wchar_t* temp = !g_scanner ? L"Scanner: not connected" : g_overheated.load() ? L"Scanner temperature: TOO HOT - let it cool" : L"Scanner temperature: normal";   // the SDK reports only overheated / back to normal, no degrees
@@ -149,7 +150,7 @@ static void dragSplitter(POINT p) { RECT r; GetClientRect(g_hwnd, &r); int W = r
 static void buildMenu() {
   g_menu = CreateMenu(); HMENU f = CreatePopupMenu(), e = CreatePopupMenu(), cur = CreatePopupMenu(), v = CreatePopupMenu(), sv = CreatePopupMenu(), rm = CreatePopupMenu(), bf = CreatePopupMenu(), cm = CreatePopupMenu(), w = CreatePopupMenu(), st = CreatePopupMenu(), sb = CreatePopupMenu(), h = CreatePopupMenu();
   AppendMenuW(f, MF_STRING, IDM_NEW, L"New project\tCtrl+N"); AppendMenuW(f, MF_STRING, IDM_OPEN, L"Open project…\tCtrl+O"); AppendMenuW(f, MF_STRING, IDM_SAVE, L"Save project\tCtrl+S"); AppendMenuW(f, MF_STRING, IDM_SAVEAS, L"Save project as…"); AppendMenuW(f, MF_SEPARATOR, 0, nullptr); AppendMenuW(f, MF_STRING, IDM_EXIT, L"Exit");
-  AppendMenuW(e, MF_STRING, IDM_ALIGNNOW, L"Auto-align visible scans now"); AppendMenuW(e, MF_SEPARATOR, 0, nullptr); AppendMenuW(cur, MF_STRING, IDM_CUR_MASS, L"Set to mass center"); AppendMenuW(cur, MF_STRING, IDM_CUR_ORIGIN, L"Set to origin of axis grid"); AppendMenuW(e, MF_POPUP, (UINT_PTR)cur, L"Cursor (rotation center)");
+  AppendMenuW(e, MF_STRING, IDM_ALIGNNOW, L"Auto-align visible scans now"); AppendMenuW(e, MF_STRING, IDM_GLOBALREG, L"Global registration of visible scans"); AppendMenuW(e, MF_STRING, IDM_CANCELPROC, L"Cancel processing (keep passes as recorded)"); AppendMenuW(e, MF_SEPARATOR, 0, nullptr); AppendMenuW(cur, MF_STRING, IDM_CUR_MASS, L"Set to mass center"); AppendMenuW(cur, MF_STRING, IDM_CUR_ORIGIN, L"Set to origin of axis grid"); AppendMenuW(e, MF_POPUP, (UINT_PTR)cur, L"Cursor (rotation center)");
   AppendMenuW(sv, MF_STRING, IDM_VFRONT, L"To front\tCtrl+Shift+1"); AppendMenuW(sv, MF_STRING, IDM_VBACK, L"To back\tCtrl+1"); AppendMenuW(sv, MF_STRING, IDM_VRIGHT, L"To right\tCtrl+Shift+3"); AppendMenuW(sv, MF_STRING, IDM_VLEFT, L"To left\tCtrl+3"); AppendMenuW(sv, MF_STRING, IDM_VTOP, L"To top\tCtrl+Shift+7"); AppendMenuW(sv, MF_STRING, IDM_VBOTTOM, L"To bottom\tCtrl+7");
   AppendMenuW(rm, MF_STRING, IDM_RSOLID, L"Render solid"); AppendMenuW(rm, MF_STRING, IDM_RWIRE, L"Render wireframe"); AppendMenuW(rm, MF_STRING, IDM_RPOINTS, L"Render points"); AppendMenuW(rm, MF_STRING, IDM_RWIRESOLID, L"Render wireframe over solid"); AppendMenuW(rm, MF_STRING, IDM_RPOINTSSOLID, L"Render points and solid"); AppendMenuW(rm, MF_SEPARATOR, 0, nullptr); AppendMenuW(rm, MF_STRING, IDM_SMOOTH, L"Smooth shading"); AppendMenuW(rm, MF_STRING, IDM_FLAT, L"Flat shading");
   AppendMenuW(bf, MF_STRING, IDM_BF_SHOW, L"Show"); AppendMenuW(bf, MF_STRING, IDM_BF_CULL, L"Cull"); AppendMenuW(bf, MF_STRING, IDM_BF_BLACK, L"Black"); AppendMenuW(bf, MF_STRING, IDM_BF_TRANS, L"Transparent");
@@ -173,6 +174,10 @@ static void syncMenu() {
 static void command(int id) {
   switch (id) {
   case IDM_NEW: doNew(); break; case IDM_OPEN: doOpen(); break; case IDM_SAVE: doSave(false); break; case IDM_SAVEAS: doSave(true); break; case IDM_EXIT: PostMessageW(g_hwnd, WM_CLOSE, 0, 0); break;
+  case IDM_GLOBALREG: if (!logic::allowed(logic::A_AutoAlign, g_mode.load(), !postIdle(), g_stuck)) { notice(L"Wait until recording and processing have finished, then try again."); break; }
+    { g_mode = M_Busy; double secs = 0; int n = globalRegisterVisible(secs); g_mode = M_Idle; ws::refresh(); ws::showProps();
+      if (n > 0) notice(L"Global registration done for " + std::to_wstring(n) + L" scan(s). Save the project."); else if (n == 0) notice(L"Show at least one scan in the Workspace."); else if (n == -1) notice(L"Global registration cancelled. The scans are unchanged."); else if (n == -3) notice(L"A pass is being cleaned (a few seconds). Try again in a moment."); else notice(L"Global registration failed. The scans are unchanged (see the log)."); } break;
+  case IDM_CANCELPROC: { int n = cancelProcessing(); bool al = cancelAlign(); notice(n || al ? L"Cancelling... the passes are kept as recorded." : L"Nothing is being processed."); } break;
   case IDM_ALIGNNOW: if (!logic::allowed(logic::A_AutoAlign, g_mode.load(), !postIdle(), g_stuck)) { notice(L"Wait until recording and processing have finished, then try again."); break; } { int vis = 0; for (auto& sc : g_scans) if (sc.visible) vis++; if (vis < 2) { notice(L"Show at least two scans in the Workspace to align them."); break; } } runAutoAlign(true); break;   // review D3
   case IDM_FIT: view::fit(); break; case IDM_HOME: view::home(); break; case IDM_SETHOME: view::setHome(); break; case IDM_ORTHO: view::ortho = !view::ortho; break; case IDM_GRID: view::grid = !view::grid; break; case IDM_LIGHT: view::lighting = !view::lighting; break; case IDM_RANGE: view::rangeMeter = !view::rangeMeter; break;
   case IDM_RSOLID: case IDM_RWIRE: case IDM_RPOINTS: case IDM_RWIRESOLID: case IDM_RPOINTSSOLID: view::renderMode = id - IDM_RSOLID; break; case IDM_SMOOTH: view::smooth = true; break; case IDM_FLAT: view::smooth = false; break;
@@ -251,11 +256,11 @@ static void onTimer() {
   if (S.audio && m == M_Record && (g_lostNow.load() || (g_alignLive.load() && !g_liveFound.load())) && std::chrono::duration<double>(clk::now() - g_lastBeep).count() > 0.7) { g_lastBeep = clk::now(); MessageBeep(MB_ICONEXCLAMATION); }
   static clk::time_point lastLog = clk::now(); if (m == M_Record && std::chrono::duration<double>(clk::now() - lastLog).count() >= 60) { lastLog = clk::now(); logf("rec fps %.2f frames %ld regFail %ld lost %ld memGB %.1f, longest draw %.0f ms, longest frame-lock wait %.0f ms", fpsNow(), g_frames.load(), g_regFail.load(), g_lost.load(), wsGB(), g_drawMaxUs.exchange(0) / 1000.0, g_cbWaitMaxUs.exchange(0) / 1000.0); }
   if (cancelStuckProcedure()) { restorePanels(); ws::refresh(); notice(L"The scanner stopped answering. Your scans are kept: SAVE THE PROJECT NOW, then close and reopen ArtecRec."); }   // review B3
-  if (abandonStuckPost()) notice(L"A scan took too long to finish processing; it is kept as recorded. You can save now.");
+  if (abandonStuckPost()) notice(L"A pass did not stop processing after Cancel; it is kept as recorded. Save the project, then close and reopen ArtecRec.");
   if (abandonStuckAlign()) { ws::refresh(); notice(L"Auto-align did not finish. Check the scans and save the project."); }
   // queued work runs once nothing is recording, aligning or being processed (review B2, F1)
-  if (g_mode.load() == M_Idle && postIdle() && g_countdown.load() == 0) {   // cloud review: never start queued work under a record countdown
-    if (g_pendingAlign) runAutoAlign();
+  if (g_mode.load() == M_Idle && g_countdown.load() == 0 && ((g_pendingAlign && postIdle()) || (g_pendingSave && !cleaningNow()))) {   // cloud review: never start queued work under a record countdown
+    if (g_pendingAlign && postIdle()) runAutoAlign();
     else if (g_pendingSave) { g_pendingSave = false; std::wstring t = g_pendingSavePath; bool ok = doSaveNow(t); if (g_pendingClose) { g_pendingClose = false; if (ok) { panel::readSettings(); panel::saveIni(); DestroyWindow(g_hwnd); return; } } } }
   { static clk::time_point lastMem = clk::now(); if (std::chrono::duration<double>(clk::now() - lastMem).count() > 30) { lastMem = clk::now(); if (logic::memLevel(freeGB()) != logic::Mem_Ok && (m == M_Idle || m == M_Record)) { std::wstring cur = g_notice.get(); if (cur.empty() || cur.rfind(L"Memory", 0) == 0) notice(L"Memory is getting low. Save the project and start a new one for the next stone."); logf("low memory: %.1f GB free", freeGB()); } } }   // review E1
   updateStatus(); { auto td = clk::now(); view::draw(); long long us = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - td).count(); if (us > g_drawMaxUs.load()) g_drawMaxUs = us; }   // R3-03 measurement
@@ -322,6 +327,7 @@ static LRESULT CALLBACK wndProc(HWND h, UINT u, WPARAM wp, LPARAM lp) {
   case WM_CLOSE:   // review B3: allowed when the scanner job is stuck, so the scans can be saved and the app closed
     if (!logic::allowed(logic::A_Close, g_mode.load(), !postIdle(), g_stuck)) { MessageBoxW(h, g_mode.load() == M_Aligning ? L"Auto-align is still running. Wait for it to finish." : L"Stop the scan first.", APP, MB_ICONINFORMATION); return 0; }
     if (g_mode.load() == M_Busy) return 0;
+    if (optimisingNow() > 0 && MessageBoxW(h, L"A pass is still being optimised.\n\nClose anyway? It is kept as recorded (saved projects are not affected).", APP, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return 0;
     if (!confirmDiscard(true)) return 0; panel::readSettings(); panel::saveIni(); DestroyWindow(h); return 0;
   case WM_DESTROY: PostQuitMessage(0); return 0;
   }
@@ -362,14 +368,16 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
       if (missing && (sav || prv)) { logf("last project folder missing after an interrupted save: %s", logic::utf8(d).c_str());
         std::wstring m = L"The last save of\n" + d + L"\nwas interrupted (power loss?). Your scans are safe:\n\n" + (sav ? L"New copy:  " + d + L"__saving\n" : L"") + (prv ? L"Previous copy:  " + d + L"__previous\n" : L"") + L"\nTo use the new copy, rename the folder \"" + logic::leafOf(d) + L"__saving\" to \"" + logic::leafOf(d) + L"\" in Explorer, then open it. Or tell the support channel.";
         MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONWARNING); } } }
-  bool autosaveTest = false; std::wstring cmdl = cmd ? cmd : L""; { size_t at = cmdl.find(L"--autosave-test"); if (at != std::wstring::npos) { autosaveTest = true; cmdl.erase(at, 15); } cmdl.erase(std::remove(cmdl.begin(), cmdl.end(), L'"'), cmdl.end()); while (!cmdl.empty() && (cmdl.back() == L' ' || cmdl.back() == L'	')) cmdl.pop_back(); while (!cmdl.empty() && cmdl.front() == L' ') cmdl.erase(cmdl.begin()); }
+  bool autosaveTest = false, processTest = false; std::wstring cmdl = cmd ? cmd : L""; { size_t at = cmdl.find(L"--autosave-test"); if (at != std::wstring::npos) { autosaveTest = true; cmdl.erase(at, 15); }
+    at = cmdl.find(L"--process-test"); if (at != std::wstring::npos) { processTest = true; cmdl.erase(at, 14); } cmdl.erase(std::remove(cmdl.begin(), cmdl.end(), L'"'), cmdl.end()); while (!cmdl.empty() && (cmdl.back() == L' ' || cmdl.back() == L'	')) cmdl.pop_back(); while (!cmdl.empty() && cmdl.front() == L' ') cmdl.erase(cmdl.begin()); }
   // autosave recovery: passes recorded after the last save of a session that did not end normally
   if (cmdl.empty()) { auto rec = autosaveRecoverable(); for (auto& r : rec) { int n = (int)r.second.size();
       std::wstring q = L"ArtecRec did not close normally last time.\n\n" + std::to_wstring(n) + L" pass(es) recorded after the last save were autosaved (" + logic::leafOf(r.first) + L").\n\nLoad them now? Then save the project.\n\nNo = keep them and ask again next time.";
       if (MessageBoxW(g_hwnd, q.c_str(), APP, MB_YESNO | MB_ICONQUESTION) == IDYES) { int got = autosaveRecover(r.first, r.second); ws::refresh(); ws::showProps(); view::fit(); view::setHome(); g_firstScan = false; notice(std::to_wstring(got) + L" pass(es) recovered. Save the project now."); }
       break; } }
   if (!cmdl.empty()) { std::wstring p = cmdl; if (p.size() > 2 && p.front() == L'"') p = p.substr(1, p.size() - 2); openPath(p); }   // review A9: Busy while loading (no recording meanwhile)
-  if (autosaveTest) { int n = 0; for (auto& sc : g_scans) { autosaveScan(sc.scan, sc.name); n++; } logf("autosave test: %d pass(es) queued", n); }   // review A9: Busy while loading (no recording meanwhile)
+  if (autosaveTest) { int n = 0; for (auto& sc : g_scans) { autosaveScan(sc.scan, sc.name); n++; } logf("autosave test: %d pass(es) queued", n); }
+  if (processTest) { int n = 0; for (auto& sc : g_scans) { startPostProcess(sc.scan, true); n++; } logf("process test: %d pass(es) being optimised", n); }   // review A9: Busy while loading (no recording meanwhile)
   MSG msg; while (GetMessageW(&msg, nullptr, 0, 0)) {
     if (msg.message == WM_MOUSEWHEEL) { POINT p; GetCursorPos(&p); HWND w = WindowFromPoint(p); if (w && w != panel::hwnd && GetParent(w) == panel::hwnd) msg.hwnd = panel::hwnd; }   // wheel over a slider/checkbox scrolls the Scan panel (Studio), it does not move the control (found 2 Nov T29)
     if (msg.message == WM_KEYDOWN) { wchar_t cls[32] = L""; GetClassNameW(msg.hwnd, cls, 32); bool edit = !_wcsicmp(cls, L"Edit"); if ((!edit || GetKeyState(VK_CONTROL) < 0 || msg.wParam == VK_F7 || msg.wParam == VK_F11) && hotkey(msg.wParam)) continue; }
