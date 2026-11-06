@@ -185,6 +185,23 @@ inline void livePose(const double Rin[4][4], const double Rout[4][4], const doub
 // newest first; try: the search attempt number since the pass started (0 = first).
 inline int searchTarget(const std::vector<int>& candidates, int tryNo) { if (candidates.empty()) return -1; int n = (int)std::min<size_t>(candidates.size(), 3); return candidates[(tryNo < 0 ? 0 : tryNo) % n]; }
 
+// ---------------------------------------------------------------- Workspace column sort (Round 4, R4-01/R4-04)
+// A strict weak ordering for every column and both directions: descending is ascending with the arguments swapped
+// (the old descending rule could say a<b and b<a for equal keys). Ties keep their order (std::stable_sort).
+struct SortKey { std::wstring name; double maxErr; int frames; int texFrames; int index; };
+inline bool iLess(const std::wstring& a, const std::wstring& b) { size_t n = std::min(a.size(), b.size()); for (size_t i = 0; i < n; i++) { wchar_t x = towlower(a[i]), y = towlower(b[i]); if (x != y) return x < y; } return a.size() < b.size(); }
+inline bool sortAsc(int col, const SortKey& A, const SortKey& B) {
+  switch (col) { case 0: return iLess(A.name, B.name); case 3: return A.maxErr < B.maxErr; case 4: return A.frames < B.frames; case 6: return A.texFrames < B.texFrames; default: return A.index < B.index; } }
+inline bool sortLess(int col, bool descending, const SortKey& A, const SortKey& B) { return descending ? sortAsc(col, B, A) : sortAsc(col, A, B); }
+// The third click restores the order the scans had before the first sort: `initial` is that order (scan ids); scans not
+// in it (recorded since) keep their current relative order after the known ones. Returns the new order as positions
+// into `current`.
+template <class Id> inline std::vector<int> restoreOrder(const std::vector<Id>& current, const std::vector<Id>& initial) {
+  std::vector<int> out; std::vector<bool> used(current.size(), false);
+  for (const Id& id : initial) for (size_t i = 0; i < current.size(); i++) if (!used[i] && current[i] == id) { out.push_back((int)i); used[i] = true; break; }
+  for (size_t i = 0; i < current.size(); i++) if (!used[i]) out.push_back((int)i);
+  return out; }
+
 // ---------------------------------------------------------------- pause/resume segments (C6)
 // One entry per recorded segment, in the order the SDK returns the scans.
 struct SegmentPose { bool found; double T[4][4]; };

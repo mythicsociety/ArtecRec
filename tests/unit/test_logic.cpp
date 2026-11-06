@@ -393,4 +393,27 @@ TEST(search_target_rotates_over_three_newest, "D1 Trail21") {
   CHECK_EQ(searchTarget({}, 0), -1); CHECK_EQ(searchTarget({2}, 5), 2); CHECK_EQ(searchTarget({4, 2}, 3), 2); CHECK_EQ(searchTarget(c, -3), 6);
 }
 
+// ================================================================= Workspace sort (Round 4)
+TEST(sort_is_strict_weak_ordering_with_equal_keys, "R4-01") {
+  // equal keys, different names: the old descending rule returned true both ways
+  std::vector<SortKey> k = {{L"Scan 1", 0.5, 100, 10, 0}, {L"Scan 2", 0.5, 100, 10, 1}, {L"scan 1", 0.7, 90, 12, 2}, {L"B", 0.5, 100, 8, 3}};
+  int bad = 0;
+  for (int col : {0, 3, 4, 6, 9}) for (bool d : {false, true}) for (auto& a : k) { if (sortLess(col, d, a, a)) bad++; for (auto& b : k) { if (sortLess(col, d, a, b) && sortLess(col, d, b, a)) bad++;
+        for (auto& c : k) if (sortLess(col, d, a, b) && sortLess(col, d, b, c) && !sortLess(col, d, a, c)) bad++; } }   // irreflexive, asymmetric, transitive
+  CHECK_EQ(bad, 0);
+}
+TEST(sort_descending_reverses_and_keeps_ties_stable, "R4-01") {
+  std::vector<SortKey> k = {{L"a", 1, 5, 0, 0}, {L"b", 2, 7, 0, 1}, {L"c", 2, 7, 0, 2}, {L"d", 3, 1, 0, 3}};
+  std::vector<int> o = {0, 1, 2, 3}; std::stable_sort(o.begin(), o.end(), [&](int a, int b) { return sortLess(4, true, k[a], k[b]); });
+  CHECK(o == (std::vector<int>{1, 2, 0, 3}));   // frames 7,7,5,1; the two 7s keep their order
+  o = {0, 1, 2, 3}; std::stable_sort(o.begin(), o.end(), [&](int a, int b) { return sortLess(0, false, k[a], k[b]); }); CHECK(o == (std::vector<int>{0, 1, 2, 3}));
+  CHECK(sortLess(0, false, {L"alpha", 0, 0, 0, 0}, {L"Beta", 0, 0, 0, 1}));   // case-insensitive names
+}
+TEST(sort_third_click_restores_initial_order, "R4-04") {
+  std::vector<int> initial = {10, 20, 30, 40}; std::vector<int> current = {40, 10, 50, 30, 20};   // sorted, plus scan 50 recorded since
+  std::vector<int> pos = restoreOrder(current, initial); std::vector<int> got; for (int p : pos) got.push_back(current[p]);
+  CHECK(got == (std::vector<int>{10, 20, 30, 40, 50}));
+  std::vector<int> deleted = {40, 10}; pos = restoreOrder(deleted, initial); got.clear(); for (int p : pos) got.push_back(deleted[p]); CHECK(got == (std::vector<int>{10, 40}));
+}
+
 int main(int argc, char** argv) { return tfw::run(argc, argv, "unit-logic"); }

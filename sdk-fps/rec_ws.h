@@ -41,14 +41,16 @@ static void layout() { RECT r; GetClientRect(hwnd, &r); MoveWindow(title, 10, 8,
 static void changed() { rebuildMaster(); g_dirty = true; refresh(); showProps(); if (onChanged) onChanged(); }
 
 static void syncVisibleFromList() {   // read every eye tick into the model
-  int n = ListView_GetItemCount(list); for (int r = 0; r < n; r++) { bool on = ListView_GetCheckState(list, r) != 0; int si = scanAt(r), gi = groupAt(r); if (si >= 0) g_scans[si].visible = on; else if (gi >= 0) g_groups[gi].visible = on; }
-  showProps(); if (onChanged) onChanged();
+  int n = ListView_GetItemCount(list); { std::lock_guard<std::mutex> l(g_scanMx); for (int r = 0; r < n; r++) { bool on = ListView_GetCheckState(list, r) != 0; int si = scanAt(r), gi = groupAt(r); if (si >= 0 && si < (int)g_scans.size()) g_scans[si].visible = on; else if (gi >= 0 && gi < (int)g_groups.size()) g_groups[gi].visible = on; } }
+  g_dirty = true; showProps(); if (onChanged) onChanged();
 }
-static void setAllVisible(bool v) { for (auto& s : g_scans) s.visible = v; for (auto& g : g_groups) g.visible = v; refresh(); showProps(); if (onChanged) onChanged(); }
-static void invert() { for (auto& s : g_scans) s.visible = !s.visible; refresh(); showProps(); if (onChanged) onChanged(); }
-static void toggleHighlighted() { for (int si : highlightedScans()) g_scans[si].visible = !g_scans[si].visible; refresh(); showProps(); if (onChanged) onChanged(); }
-static void showHighlighted(bool v) { for (int si : highlightedScans()) g_scans[si].visible = v; refresh(); showProps(); if (onChanged) onChanged(); }
-static void onlyThis(int si) { for (auto& s : g_scans) s.visible = false; if (si >= 0) g_scans[si].visible = true; refresh(); showProps(); if (onChanged) onChanged(); }
+// Round 4 (R4-02/R4-03): visibility is saved (groups sidecar) -> project modified; written under the scan lock, which
+// background work holds when it reads it. Colour is display-only and not saved -> not "modified".
+static void setAllVisible(bool v) { { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) s.visible = v; for (auto& g : g_groups) g.visible = v; } g_dirty = true; refresh(); showProps(); if (onChanged) onChanged(); }
+static void invert() { { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) s.visible = !s.visible; } g_dirty = true; refresh(); showProps(); if (onChanged) onChanged(); }
+static void toggleHighlighted() { std::vector<int> hs = highlightedScans(); { std::lock_guard<std::mutex> l(g_scanMx); for (int si : hs) if (si < (int)g_scans.size()) g_scans[si].visible = !g_scans[si].visible; } g_dirty = true; refresh(); showProps(); if (onChanged) onChanged(); }
+static void showHighlighted(bool v) { std::vector<int> hs = highlightedScans(); { std::lock_guard<std::mutex> l(g_scanMx); for (int si : hs) if (si < (int)g_scans.size()) g_scans[si].visible = v; } g_dirty = true; refresh(); showProps(); if (onChanged) onChanged(); }
+static void onlyThis(int si) { { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) s.visible = false; if (si >= 0 && si < (int)g_scans.size()) g_scans[si].visible = true; } g_dirty = true; refresh(); showProps(); if (onChanged) onChanged(); }
 static void deleteSelected(HWND owner) {
   if (!editOk()) return;
   std::vector<int> v = highlightedScans(); int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); int gi = r >= 0 ? groupAt(r) : -1; if (v.empty() && gi < 0) return;
@@ -73,13 +75,15 @@ static void changeColor(HWND owner) {
 static void rename() { if (!editOk()) return; int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); if (r >= 0) { SetFocus(list); ListView_EditLabel(list, r); } }
 static void sortBy(int col) {   // Studio: click a header → ascending → descending → initial
   if (!editOk()) return;
-  if (sortCol != col) { sortCol = col; sortDir = 1; } else sortDir = sortDir == 1 ? 2 : sortDir == 2 ? 0 : 1;
-  static std::vector<ScanRec> initial; if (sortDir == 1 && initial.empty()) { /* keep a copy of the order only via names */ }
-  std::vector<int> order(g_scans.size()); for (int i = 0; i < (int)order.size(); i++) order[i] = i;
-  if (sortDir) { auto key = [&](int a, int b) { auto& A = g_scans[a]; auto& B = g_scans[b]; bool lt; switch (col) { case 0: lt = _wcsicmp(A.name.c_str(), B.name.c_str()) < 0; break; case 3: lt = A.maxErr < B.maxErr; break; case 4: lt = A.frames < B.frames; break; case 6: lt = A.texFrames < B.texFrames; break; default: lt = a < b; } return sortDir == 1 ? lt : !lt && !(A.name == B.name && A.frames == B.frames); };
-    std::stable_sort(order.begin(), order.end(), key); }
-  else return;   // "initial": leave the current (creation) order as is
-  { std::lock_guard<std::mutex> l(g_scanMx); std::vector<ScanRec> ns; for (int i : order) ns.push_back(std::move(g_scans[i])); g_scans = std::move(ns); } /* review C2: moved under the lock */ view::selectedScan = -1; rebuildMaster(); refresh(); showProps();
+  static std::vector<IScan*> initialOrder;   // the order before the first sort, by scan object (R4-04)
+  if (sortCol != col) { if (sortDir == 0) { initialOrder.clear(); for (auto& r : g_scans) initialOrder.push_back(r.scan); } sortCol = col; sortDir = 1; } else sortDir = sortDir == 1 ? 2 : sortDir == 2 ? 0 : 1;
+  if (sortDir == 1 && initialOrder.empty()) for (auto& r : g_scans) initialOrder.push_back(r.scan);
+  std::vector<int> order;
+  if (sortDir) { std::vector<logic::SortKey> keys; for (int i = 0; i < (int)g_scans.size(); i++) keys.push_back({g_scans[i].name, (double)g_scans[i].maxErr, g_scans[i].frames, g_scans[i].texFrames, i});
+    order.resize(g_scans.size()); for (int i = 0; i < (int)order.size(); i++) order[i] = i;
+    bool desc = sortDir == 2; std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return logic::sortLess(col, desc, keys[a], keys[b]); }); }   // R4-01: strict weak ordering
+  else { std::vector<IScan*> cur; for (auto& r : g_scans) cur.push_back(r.scan); order = logic::restoreOrder(cur, initialOrder); initialOrder.clear(); sortCol = -1; }   // R4-04: back to the order before sorting
+  { std::lock_guard<std::mutex> l(g_scanMx); std::vector<ScanRec> ns; for (int i : order) ns.push_back(std::move(g_scans[i])); g_scans = std::move(ns); } /* review C2: moved under the lock */ g_dirty = true; /* the scan order is saved */ view::selectedScan = -1; rebuildMaster(); refresh(); showProps();
 }
 static void contextMenu(HWND owner, int x, int y) {
   HMENU m = CreatePopupMenu(); std::vector<int> v = highlightedScans(); bool any = !v.empty(); int r = ListView_GetNextItem(list, -1, LVNI_SELECTED); bool grp = r >= 0 && groupAt(r) >= 0;
@@ -95,7 +99,7 @@ static bool notify(HWND owner, NMHDR* n) {
   if (n->hwndFrom != list) return false; nres = 0;
   switch (n->code) {
   case LVN_ITEMCHANGED: { if (refreshing) return true; auto* p = (NMLISTVIEW*)n;
-    if ((p->uNewState ^ p->uOldState) & LVIS_STATEIMAGEMASK) { bool on = ((p->uNewState & LVIS_STATEIMAGEMASK) >> 12) == 2; int si = scanAt(p->iItem), gi = groupAt(p->iItem); if (si >= 0) g_scans[si].visible = on; else if (gi >= 0) g_groups[gi].visible = on; showProps(); if (onChanged) onChanged(); }
+    if ((p->uNewState ^ p->uOldState) & LVIS_STATEIMAGEMASK) { bool on = ((p->uNewState & LVIS_STATEIMAGEMASK) >> 12) == 2; int si = scanAt(p->iItem), gi = groupAt(p->iItem); { std::lock_guard<std::mutex> l(g_scanMx); if (si >= 0 && si < (int)g_scans.size()) g_scans[si].visible = on; else if (gi >= 0 && gi < (int)g_groups.size()) g_groups[gi].visible = on; } g_dirty = true; showProps(); if (onChanged) onChanged(); }
     if ((p->uNewState & LVIS_SELECTED) && !(p->uOldState & LVIS_SELECTED)) { view::selectedScan = scanAt(p->iItem); showProps(); } return true; }
   case NM_CLICK: { auto* p = (NMITEMACTIVATE*)n; bool ctrl = GetKeyState(VK_CONTROL) < 0, alt = GetKeyState(VK_MENU) < 0; if (p->iItem >= 0 && ((ctrl && alt) || (ctrl && p->iSubItem == 0 && p->ptAction.x < 20))) { int si = scanAt(p->iItem); if (si >= 0) onlyThis(si); } return true; }
   case LVN_COLUMNCLICK: { auto* p = (NMLISTVIEW*)n; sortBy(p->iSubItem); return true; }
