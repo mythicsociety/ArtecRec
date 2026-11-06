@@ -365,7 +365,7 @@ static void prepareRecording(bool recording) {
   if (g_alignLive) { std::lock_guard<std::mutex> l(g_tempMx); createScan(&g_tempScan, g_scannerId.type); createScan(&g_tempTex, g_scannerId.type); }
 }
 // Review B1 (second pass): the UI never joins the search without a bound. Stop it, wait up to 10 s, then let it go.
-static void joinSearchBounded() { g_searchStop = true; for (int i = 0; i < 200 && g_searchBusy.load(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+static void joinSearchBounded() { g_searchStop = true; for (int i = 0; i < 500 && g_searchBusy.load(); i++) { MSG pm; while (PeekMessageW(&pm, nullptr, WM_PAINT, WM_PAINT, PM_REMOVE)) DispatchMessageW(&pm); Sleep(20); }   /* DeepSeek 7-2: repaint while waiting (10 s max); paint only, so no handler re-enters onJobDone */
   if (g_searchThread.joinable()) { if (g_searchBusy.load()) { logf("the position search did not stop in 10 s: left to finish on its own (its result is ignored)"); ++g_searchGen; g_searchZombie = true; g_searchThread.detach(); notice(L"The position search is taking too long to stop. Live joining is paused until ArtecRec is restarted; recording, auto-align after Stop and saving still work."); } else g_searchThread.join(); } g_searchBusy = false; }   // DeepSeek 3-4
 // Review C6: one live-search result per recorded segment (Pause/Resume makes one scan per segment).
 static std::vector<logic::SegmentPose> g_segPoses;
@@ -1039,7 +1039,9 @@ static bool removeDir(const std::wstring& dir) { std::wstring dz = dir; dz.push_
 static bool dirExists(const std::wstring& d) { DWORD a = GetFileAttributesW(d.c_str()); return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY); }
 static std::vector<logic::FolderEntry> listFolder(const std::wstring& dir, bool* ok = nullptr) {
   std::vector<logic::FolderEntry> v; if (ok) *ok = false; WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd); if (h == INVALID_HANDLE_VALUE) return v; if (ok) *ok = true;
-  do { std::wstring n = fd.cFileName; if (n == L"." || n == L"..") continue; v.push_back({n, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0}); } while (FindNextFileW(h, &fd)); FindClose(h); return v; }
+  do { std::wstring n = fd.cFileName; if (n == L"." || n == L"..") continue; v.push_back({n, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0}); } while (FindNextFileW(h, &fd));
+  DWORD e = GetLastError(); FindClose(h); if (e != ERROR_NO_MORE_FILES) { if (ok) *ok = false; logf("folder listing stopped part-way (error %lu): treated as not checked", e); }   // DeepSeek 7-1: partial = not listed (fail closed)
+  return v; }
 // Review A1/A2/A3/F6. Save:
 //  - only when no scan is being tidied (the caller queues otherwise), from a snapshot model the UI cannot change;
 //  - into a new folder, or by swapping out a folder that is this project's own (logic::canReplaceFolder): never a folder
@@ -1057,7 +1059,7 @@ static bool saveProject(const std::wstring& sproj) {
   bool ours = (logic::iEquals(sproj, g_projPath) && (marker || sidecar)) || (marker && logic::iEquals(sproj, g_replaceOk));   // another ArtecRec project of the same name is replaced only after the user said yes
   logic::SwapVerdict v = logic::canReplaceFolder(exists, entries, stem, ours, foreignNow, listed);
   bool studioDirs = false; for (auto& e : entries) if (e.dir && (logic::iEquals(e.name, L"Models") || logic::iEquals(e.name, L"Data") || logic::iEquals(e.name, L"Thumbnails"))) studioDirs = true;   // Gemini 5
-  if (v == logic::Swap_Foreign || v == logic::Swap_NotOurs) { g_saveErr = (foreignNow || studioDirs) ? L"The project in\n" + dir + L"\nnow holds models made in Artec Studio. ArtecRec will not replace it.\n\nUse Save project as... with a new name." : L"The folder\n" + dir + L"\nalready holds other files (or a project ArtecRec did not make). ArtecRec will not replace it.\n\nUse Save project as... with a new name."; logf("save refused: %ls is not this project's own folder", dir.c_str()); return false; }
+  if (v == logic::Swap_Foreign || v == logic::Swap_NotOurs) { g_saveErr = (foreignNow || studioDirs) ? L"The project in\n" + dir + L"\nnow holds models made in Artec Studio. ArtecRec will not replace it.\n\nUse Save project as... with a new name." : L"The folder\n" + dir + L"\nalready holds other files (or a project ArtecRec did not make). ArtecRec will not replace it.\n\nUse Save project as... with a new name."; logf("save refused: %s is not this project's own folder", logic::utf8(dir).c_str()); return false; }
   bool swap = exists; /* the SDK saver cannot write into an existing folder, even an empty one */ std::wstring outDir = swap ? dir + L"__saving" : dir, outProj = outDir + L"\\" + name;
   for (auto& z : g_zombieSaveDirs) if (logic::iEquals(z, outDir)) { g_saveErr = L"An earlier save of this project was given up and may still be writing to\n" + outDir + L"\n\nSave under a new name, or close and reopen ArtecRec first."; logf("save refused: an abandoned save may still be writing %s", logic::utf8(outDir).c_str()); return false; }   // DeepSeek 2-2
   if (swap && dirExists(outDir)) removeDir(outDir);   // our own leftover from an interrupted save
