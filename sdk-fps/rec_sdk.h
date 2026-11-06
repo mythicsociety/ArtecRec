@@ -206,7 +206,7 @@ static std::mutex g_mx;
 static FrameMesh g_live; static std::vector<FrameMesh> g_liveAcc; static float g_liveCentre[3] = {0, 0, 0};
 static float g_liveTexAvg[3] = {0.7f, 0.7f, 0.68f}; static bool g_liveTexSet = false;
 static double g_liveRot[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}; static bool g_liveRotSet = false;   // inverse scanner rotation (GL column-major): the view follows the scanner like Studio
-static std::vector<float> g_hist; static int g_histN = 32; static bool g_newData = false;
+static std::vector<float> g_hist; static int g_histN = 32; static std::atomic<bool> g_newData{false};   /* set by the scanning thread, cleared by the UI (DeepSeek 5-1) */
 static std::deque<std::vector<float>> g_histKeys; static std::vector<float> g_histKey;   // Studio's grey histogram: registered key frames (last 20)
 static const size_t LIVE_ACC_MAX = 150;
 

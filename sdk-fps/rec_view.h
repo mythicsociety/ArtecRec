@@ -179,7 +179,7 @@ static int hitButton(int x, int y, int w, int h) { if (x >= 10 && x <= 70 && y >
 
 static void render(int w, int h, bool forShot) {
   int mode = g_mode.load(); bool lost = mode == M_Record && g_lostNow.load();
-  { std::lock_guard<std::mutex> l(g_mx); if (follow && !g_live.v.empty() && mode != M_Idle) for (int a = 0; a < 3; a++) target[a] += (g_liveCentre[a] - target[a]) * 0.25f; }
+  { std::lock_guard<std::mutex> l(g_mx); if (follow && !forShot && !g_live.v.empty() && mode != M_Idle) for (int a = 0; a < 3; a++) target[a] += (g_liveCentre[a] - target[a]) * 0.25f; }
   setupCamera(w, h);
   if (forShot) { if (S.shotBg == 1) glClearColor(0, 0, 0, 1); else glClearColor(1, 1, 1, 1); } else if (lost) glClearColor(0.66f, 0.50f, 0.50f, 1); else glClearColor(0.63f, 0.64f, 0.66f, 1);   // Studio: "dropped" background on misalignment
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -233,8 +233,8 @@ static void render(int w, int h, bool forShot) {
     if (scanningNow && !g_live.v.empty()) { bool lit = lighting; lighting = false; glDisable(GL_DEPTH_TEST);
       FrameMesh& m = g_live; if (lost && !m.col.empty()) { std::vector<float> keep; keep.swap(m.col); drawMesh(m, cur, false, false); keep.swap(m.col); } else drawMesh(m, cur, false, false); lighting = lit; glEnable(GL_DEPTH_TEST); }
     glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0, 0); } }
-  drawRotCentre(); deleteTrashTextures();
-  if (forShot) return;
+  deleteTrashTextures(); if (forShot) return;   // DeepSeek 5-2: no rotation-centre marker in screenshots
+  drawRotCentre();
   overlayBegin(w, h);
   if (rangeMeter && mode != M_Idle) drawRangeMeter(w, h); drawGizmo(w, h); drawButtons(w, h);
   // 4 Nov 16:54: after a second loss every frame failed for a minute (314 of 315) — the scanner saw nothing it could
