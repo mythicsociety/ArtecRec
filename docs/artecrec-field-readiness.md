@@ -51,6 +51,21 @@ owner-approved. Field check: after the next crash or kill, the recovery question
 Field finding 6 Nov: global registration hit its 120 s limit on 6 long passes (250-480 frames); measure the
 real time on the laptop and set the limit from it.
 
+## No time limits on processing (6 Nov, commit 73049b5, not yet installed)
+
+Owner: "why should there be a limit at all?" Processing runs until it ends; Edit > Cancel processing stops it; a step
+that reports progress and stops reporting for 5 min is treated as hung. Save no longer waits for processing. Global
+registration is run from the Edit menu (owner option A). Tests 100/0/0.
+
+Measured on the field laptop, 15-minute pass (5,269 frames, D:\ArtecDiag	_auto_big):
+
+| Step | Time | Old fixed limit |
+|---|---|---|
+| Open the project | 154 s | - |
+| Surface optimisation | 104 s | 90 s (would have been cut) |
+| Global registration | 25 % after 30 min (about 2 h) | 120 s |
+| Auto-align, 2 scans | 89 s | 60 s (would have been cut) |
+
 ## Still needing a field check (verified by code reading only)
 
 | Item | How the acceptance session or the trip shows it |
