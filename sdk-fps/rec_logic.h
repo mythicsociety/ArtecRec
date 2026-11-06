@@ -218,6 +218,14 @@ inline bool giveUpAfterCancel(double secsSinceCancel) { return secsSinceCancel >
 inline bool askKeepWaiting(bool reportsProgress, double silentSecs, double elapsedSecs, double askSecs) {
   return reportsProgress ? silentSecs > askSecs : elapsedSecs > askSecs * 3; }
 
+// ---------------------------------------------------------------- after Stop (6 Nov field findings, Trail26/27)
+// A scan recorded after a tracking loss that never found its position and is shorter than 30 frames (~5 s) is the stub
+// between the loss and the user's Stop (16:06, 16:37: 13- and 16-frame scans were kept). Under 10 frames: always a stub.
+inline bool discardStub(int frames, bool found, bool afterLoss) { if (frames < 10) return true; return afterLoss && !found && frames < 30; }
+// The pass a new pass was joined to live is an anchor from then on, so auto-align never moves it (16:38: scan 1 was
+// moved 5.1 mm after scan 2 had joined it to 0.18 mm, because only scan 2 counted as placed).
+inline void anchorJoinTargets(std::vector<bool>& placed, const std::vector<int>& joinedTo) { for (int i : joinedTo) if (i >= 0 && i < (int)placed.size()) placed[i] = true; }
+
 // ---------------------------------------------------------------- autosave manifest (6 Nov, per-pass background autosave)
 // One manifest per session: "P\t<id>\t<folder>\t<name>" a pass saved (a later P with the same id replaces it, e.g. after
 // auto-align moved the pass); "S\t<time>" the project was saved (everything before is covered); "X\t<time>" the user

@@ -449,4 +449,16 @@ TEST(save_allowed_while_processing, "no-limit") {
   CHECK(!allowed(A_Open, M_Idle, true, false)); CHECK(!allowed(A_AutoAlign, M_Idle, true, false));
 }
 
+// ================================================================= after Stop (6 Nov)
+TEST(stub_after_loss_discarded, "after-stop") {
+  CHECK(discardStub(6, false, false)); CHECK(discardStub(9, true, true));                 // under 10 frames: always
+  CHECK(discardStub(13, false, true)); CHECK(discardStub(16, false, true)); CHECK(discardStub(29, false, true));   // the 6 Nov stubs
+  CHECK(!discardStub(30, false, true)); CHECK(!discardStub(16, true, true)); CHECK(!discardStub(16, false, false)); CHECK(!discardStub(248, false, true));
+}
+TEST(join_target_becomes_anchor, "after-stop") {
+  std::vector<bool> p = {false, true, false}; anchorJoinTargets(p, {0}); CHECK(p[0] && p[1] && !p[2]);
+  anchorJoinTargets(p, {-1, 7, 2}); CHECK(p[2]); CHECK_EQ((int)p.size(), 3);   // out-of-range indices are ignored
+  std::vector<bool> q = {false}; anchorJoinTargets(q, {}); CHECK(!q[0]);
+}
+
 int main(int argc, char** argv) { return tfw::run(argc, argv, "unit-logic"); }

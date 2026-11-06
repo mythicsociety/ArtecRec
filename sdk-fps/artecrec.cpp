@@ -19,7 +19,7 @@ static bool g_fitOnPost = false, g_capRestart = false, g_capWedged = false; stat
 static void layout(); static clk::time_point g_cdStart; static bool g_firstScan = true;
 // review B5/B4/F1: user Stop during an automatic restart; consecutive fresh restarts; the scanner stopped sending;
 // a save waiting for the tidy-up to finish (and closing after it)
-static bool g_userStop = false, g_stallStop = false, g_limitRestart = false; static int g_newSinceAlign = 0; /* scans recorded since the last auto-align (cloud review) */ static int g_freshRestarts = 0; static bool g_pendingSave = false, g_pendingClose = false; static std::wstring g_pendingSavePath;
+static bool g_userStop = false, g_stallStop = false, g_limitRestart = false, g_lossRestart = false; static int g_newSinceAlign = 0; /* scans recorded since the last auto-align (cloud review) */ static int g_freshRestarts = 0; static bool g_pendingSave = false, g_pendingClose = false; static std::wstring g_pendingSavePath;
 static HFONT g_font, g_fontB, g_fontSmall; static ULONG_PTR g_gdip;
 
 // ---------------------------------------------------------------- scanning control (Studio: Preview / Record / Pause / Stop, Space toggles)
@@ -41,7 +41,7 @@ static void beginRecordNow() {
 }
 static void restorePanels() { if (!g_fullView) return; g_fullView = false; g_showPanel = g_savedPanel; g_showWs = g_savedWs; g_showLog = g_savedLog; layout(); SetFocus(view::hwnd); }
 static void doRecord() {
-  int m = g_mode.load();
+  int m = g_mode.load(); if (m == M_Idle || m == M_Preview) { g_afterLoss = false; g_lossRestart = false; }   /* a recording the user starts is not a loss restart */
   if (m == M_Record && g_proc) { g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); pushSegmentPose(); g_segPushedAtPause = true; g_proc->setState(ScanningState_Preview); g_mode = M_Paused; logf("paused"); return; }   // review C6
   if (g_countdown.load() > 0) return;
   if (!logic::allowed(logic::A_Record, m, !postIdle(), g_stuck)) return;
@@ -229,10 +229,10 @@ static void onTimer() {
   { static clk::time_point lostAt; static bool wasLostR = false; bool lostR = m == M_Record && g_lostNow.load();
     if (lostR && !wasLostR) lostAt = clk::now(); wasLostR = lostR;
     if (lostR && !g_autoRestart && g_storedFrames.load() <= 10 && std::chrono::duration<double>(clk::now() - lostAt).count() > 3.0) { wasLostR = false;
-      if (logic::mayRestartFresh(g_freshRestarts, g_userStop, g_reconnect)) { g_freshRestarts++; g_autoRestart = true; g_resumeGroupWith = (int)g_scans.size(); logf("no tracking for 3 s on a fresh recording: restarting it (%d)", g_freshRestarts); }
+      if (logic::mayRestartFresh(g_freshRestarts, g_userStop, g_reconnect)) { g_freshRestarts++; g_autoRestart = true; g_lossRestart = true; g_resumeGroupWith = (int)g_scans.size(); logf("no tracking for 3 s on a fresh recording: restarting it (%d)", g_freshRestarts); }
       else { logf("no tracking after %d fresh restarts: recording stopped", g_freshRestarts); notice(L"The scanner cannot find the surface. Point it at the stone you already scanned, about 25 cm away, and press Record."); g_userStop = true; }   // review B5
       g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); stopProcedure(); } }
-  static int lostRun = 0; if (m == M_Record) { lostRun = g_lostNow.load() ? lostRun + 1 : 0; if (lostRun >= 2 && !g_autoRestart && g_storedFrames.load() > 10) { lostRun = 0; g_autoRestart = true; g_resumeGroupWith = (int)g_scans.size(); logf("tracking lost: ending this scan%s", S.scanUsingAutoAlign ? ", searching for position in a new one" : ""); g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); stopProcedure(); } } else lostRun = 0;
+  static int lostRun = 0; if (m == M_Record) { lostRun = g_lostNow.load() ? lostRun + 1 : 0; if (lostRun >= 2 && !g_autoRestart && g_storedFrames.load() > 10) { lostRun = 0; g_autoRestart = true; g_lossRestart = true; g_resumeGroupWith = (int)g_scans.size(); logf("tracking lost: ending this scan%s", S.scanUsingAutoAlign ? ", searching for position in a new one" : ""); g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); stopProcedure(); } } else lostRun = 0;
   // Capture watchdog (09:05 case: Preview ran 17 s with no frame from the scanner). Restart the capture once or twice,
   // then tell the user to reconnect the scanner.
   // review B10: a capture that delivers frames resets the restart budget
@@ -275,11 +275,11 @@ static void jobDone(int gen) {
   if (added && g_firstScan) { g_fitOnPost = true; g_firstScan = false; }   // fit once the scan's display meshes arrive (WM_POSTDONE)
   if (g_autoRestart) { g_autoRestart = false;
     // review B5: no automatic restart after the user's Stop, a scanner drop, a stalled scanner, or a stuck job
-    if (userStop || stall || g_reconnect || g_stuck) { g_resumeGroupWith = -1; g_freshRestarts = 0; restorePanels(); if (g_reconnect) notice(L"The scanner disconnected. ArtecRec is reconnecting; press Record when the scanner is back."); return; }
+    if (userStop || stall || g_reconnect || g_stuck) { g_lossRestart = false; g_resumeGroupWith = -1; g_freshRestarts = 0; restorePanels(); if (g_reconnect) notice(L"The scanner disconnected. ArtecRec is reconnecting; press Record when the scanner is back."); return; }
     bool limit = g_limitRestart; g_limitRestart = false;
-    if (resumeSearch && !S.scanUsingAutoAlign && !limit) { g_resumeGroupWith = -1; restorePanels(); return; }   // option off: Studio shows "Tracking lost" and waits for the user
+    if (resumeSearch && !S.scanUsingAutoAlign && !limit) { g_lossRestart = false; g_resumeGroupWith = -1; restorePanels(); return; }   // option off: Studio shows "Tracking lost" and waits for the user
     if (added) g_freshRestarts = 0;
-    g_forceAlign = resumeSearch; beginRecordNow(); g_forceAlign = false;   // (S.autoAlign is re-read from the panel inside beginRecordNow, so a flag is used instead)
+    g_afterLoss = g_lossRestart; g_lossRestart = false; g_forceAlign = resumeSearch; beginRecordNow(); g_forceAlign = false;   // (S.autoAlign is re-read from the panel inside beginRecordNow, so a flag is used instead)
     if (g_mode.load() != M_Record) { restorePanels(); return; }
     if (resumeSearch && added) g_resumeGroupWith = (int)g_scans.size() - 1;   // the next scan is grouped with the one that just ended (Studio groups resumed scans)
     return; }
