@@ -86,7 +86,8 @@ struct FrameMesh {
   std::shared_ptr<GlTex> texp;   // shared photo (stored scans); when set it is used instead of tex/texId
   unsigned vbo = 0, ibo = 0; size_t offN = 0, offUv = 0, offCol = 0; bool noVbo = false;   // GPU copies (built on first draw); the live frame changes every frame and stays in client memory
   FrameMesh() {} FrameMesh(FrameMesh&& o) noexcept { *this = std::move(o); }
-  FrameMesh& operator=(FrameMesh&& o) noexcept { v = std::move(o.v); n = std::move(o.n); col = std::move(o.col); uv = std::move(o.uv); idx = std::move(o.idx); memcpy(centre, o.centre, sizeof centre); memcpy(texAvg, o.texAvg, sizeof texAvg); tex = std::move(o.tex); texW = o.texW; texH = o.texH; texId = o.texId; o.texId = 0; texp = std::move(o.texp);
+  // Round 3 (R3-01): the destination's own GL texture/buffers go to the trash before they are overwritten (they leaked)
+  FrameMesh& operator=(FrameMesh&& o) noexcept { if (this == &o) return *this; if (texId || vbo || ibo) { std::lock_guard<std::mutex> l(g_texTrashMx); if (texId) g_texTrash.push_back(texId); if (vbo) g_bufTrash.push_back(vbo); if (ibo) g_bufTrash.push_back(ibo); texId = vbo = ibo = 0; } v = std::move(o.v); n = std::move(o.n); col = std::move(o.col); uv = std::move(o.uv); idx = std::move(o.idx); memcpy(centre, o.centre, sizeof centre); memcpy(texAvg, o.texAvg, sizeof texAvg); tex = std::move(o.tex); texW = o.texW; texH = o.texH; texId = o.texId; o.texId = 0; texp = std::move(o.texp);
     vbo = o.vbo; ibo = o.ibo; offN = o.offN; offUv = o.offUv; offCol = o.offCol; noVbo = o.noVbo; o.vbo = o.ibo = 0; return *this; }
   FrameMesh(const FrameMesh& o) { v = o.v; n = o.n; col = o.col; uv = o.uv; idx = o.idx; memcpy(centre, o.centre, sizeof centre); memcpy(texAvg, o.texAvg, sizeof texAvg); tex = o.tex; texW = o.texW; texH = o.texH; texId = 0; noVbo = o.noVbo; texp = o.texp; }
   ~FrameMesh() { std::lock_guard<std::mutex> l(g_texTrashMx); if (texId) g_texTrash.push_back(texId); if (vbo) g_bufTrash.push_back(vbo); if (ibo) g_bufTrash.push_back(ibo); }
@@ -105,6 +106,7 @@ static bool frameFeatures(const IFrameMesh* fm, int targetW, feat::Frame& out) {
 }
 static void framePointsT(const IFrameMesh* fm, const double M[4][4], int step, std::vector<float>& out) { IArrayPoint3F* pts = fm->getPoints(); if (!pts) return; const Point3F* p = pts->getPointer(); for (int i = 0; i < pts->getSize(); i += step) { double x = p[i].x, y = p[i].y, z = p[i].z; out.push_back((float)(M[0][0] * x + M[0][1] * y + M[0][2] * z + M[0][3])); out.push_back((float)(M[1][0] * x + M[1][1] * y + M[1][2] * z + M[1][3])); out.push_back((float)(M[2][0] * x + M[2][1] * y + M[2][2] * z + M[2][3])); } }
 // copy a frame's texture image as RGB, halved in each direction
+static std::atomic<long long> g_cbWaitMaxUs{0}, g_drawMaxUs{0};   // Round 3 (R3-03): longest frame-lock wait in the callback / longest draw, per minute
 static void grabTexture(const IFrameMesh* f, FrameMesh& out) {
   IImage* img = f->getImage(); IArrayUVCoordinates* uvs = f->getUVCoordinates(); if (!img || !uvs) return; int w = img->getWidth(), h = img->getHeight(), pitch = img->getPitch(); PixelFormat pf = img->getPixelFormat();
   int ch = pf == PixelFormat_BGR || pf == PixelFormat_RGB ? 3 : pf == PixelFormat_BGRA || pf == PixelFormat_RGBA ? 4 : pf == PixelFormat_Mono ? 1 : 0;
@@ -301,7 +303,9 @@ struct Obs : public ScanningProcedureObserverBase {
     // depth histogram of this frame
     std::vector<float> h(g_histN, 0.f); IArrayPoint3F* pts = f->getPoints(); if (pts) { int n = pts->getSize(); const Point3F* p = pts->getPointer(); float lo = S.nearMm.load() - 40, hi = S.farMm.load() + 40;
       for (int k = 0; k < n; k += 4) { float d = -p[k].z; int b = (int)((d - lo) / (hi - lo) * g_histN); if (b >= 0 && b < g_histN) h[b] += 1; } float mx = 1; for (float x : h) mx = x > mx ? x : mx; for (float& x : h) x /= mx; }
-    std::lock_guard<std::mutex> l(g_mx);
+    // Round 3: build the accumulated copy (and grab its texture) outside the lock; measure how long the lock is waited for
+    bool accum = rec && !lost && i->frameState == FrameState_Ok && (i->geometryKeyFrame || (g_frames.load() % 2 == 0)); FrameMesh k; if (accum) { k = FrameMesh(m); k.col.clear(); if (f->isTextured()) grabTexture(f, k); }
+    auto tw = clk::now(); std::lock_guard<std::mutex> l(g_mx); { long long us = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - tw).count(); long long prev = g_cbWaitMaxUs.load(); while (us > prev && !g_cbWaitMaxUs.compare_exchange_weak(prev, us)) {} }
     memcpy(g_liveCentre, m.centre, sizeof g_liveCentre);
     for (int c = 0; c < 3; c++) for (int r = 0; r < 3; r++) g_liveRot[c * 4 + r] = M[c][r]; g_liveRotSet = true;   // R^T of the frame pose
     if (rec && i->geometryKeyFrame && !lost) { g_histKeys.push_back(h); if (g_histKeys.size() > 20) g_histKeys.pop_front(); g_histKey.assign(g_histN, 0.f); for (auto& hk : g_histKeys) for (int b = 0; b < g_histN; b++) g_histKey[b] += hk[b]; float mx = 1; for (float x : g_histKey) mx = x > mx ? x : mx; for (float& x : g_histKey) x /= mx; }
@@ -310,7 +314,7 @@ struct Obs : public ScanningProcedureObserverBase {
     // holes on screen. Key frames only (earlier) left the holes visible until Stop.
     // 5 Nov, owner: Studio shows the area covered in this pass as a dense green; keep the distance colours on the
     // accumulated frames when "Show distance color" is on (they are drawn flat, unlit — rec_view.h).
-    if (rec && !lost && i->frameState == FrameState_Ok && (i->geometryKeyFrame || (g_frames.load() % 2 == 0))) { FrameMesh k = m; k.col.clear(); if (f->isTextured()) { grabTexture(f, k); if (!k.uv.empty()) { for (int a = 0; a < 3; a++) g_liveTexAvg[a] = g_liveTexSet ? g_liveTexAvg[a] * 0.8f + k.texAvg[a] * 0.2f : k.texAvg[a]; g_liveTexSet = true; } }   // Studio shows captured surfaces textured while scanning
+    if (accum) { if (f->isTextured()) { if (!k.uv.empty()) { for (int a = 0; a < 3; a++) g_liveTexAvg[a] = g_liveTexSet ? g_liveTexAvg[a] * 0.8f + k.texAvg[a] * 0.2f : k.texAvg[a]; g_liveTexSet = true; } }   // Studio shows captured surfaces textured while scanning
       if (g_liveAcc.size() >= LIVE_ACC_MAX) { std::vector<FrameMesh> half; for (size_t j = 0; j < g_liveAcc.size(); j += 2) half.push_back(std::move(g_liveAcc[j])); g_liveAcc = std::move(half); } g_liveAcc.push_back(std::move(k)); }
     g_live = std::move(m); g_live.noVbo = true; g_newData = true;
   }

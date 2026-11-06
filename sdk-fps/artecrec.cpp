@@ -223,7 +223,7 @@ static void onTimer() {
   if (g_capRestarts == 0 && g_capWedged) { g_capWedged = false; notice(L"The scanner is connected but sends no pictures. Unplug its power and USB cables, wait 10 s, plug the power in, then the USB, and press Preview again."); }   // review B9: no message box
   // Studio beeps continuously while tracking is lost and while it searches for the position; stops once tracking resumes.
   if (S.audio && m == M_Record && (g_lostNow.load() || (g_alignLive.load() && !g_liveFound.load())) && std::chrono::duration<double>(clk::now() - g_lastBeep).count() > 0.7) { g_lastBeep = clk::now(); MessageBeep(MB_ICONEXCLAMATION); }
-  static clk::time_point lastLog = clk::now(); if (m == M_Record && std::chrono::duration<double>(clk::now() - lastLog).count() >= 60) { lastLog = clk::now(); logf("rec fps %.2f frames %ld regFail %ld lost %ld memGB %.1f", fpsNow(), g_frames.load(), g_regFail.load(), g_lost.load(), wsGB()); }
+  static clk::time_point lastLog = clk::now(); if (m == M_Record && std::chrono::duration<double>(clk::now() - lastLog).count() >= 60) { lastLog = clk::now(); logf("rec fps %.2f frames %ld regFail %ld lost %ld memGB %.1f, longest draw %.0f ms, longest frame-lock wait %.0f ms", fpsNow(), g_frames.load(), g_regFail.load(), g_lost.load(), wsGB(), g_drawMaxUs.exchange(0) / 1000.0, g_cbWaitMaxUs.exchange(0) / 1000.0); }
   if (cancelStuckProcedure()) { restorePanels(); ws::refresh(); notice(L"The scanner stopped answering. Your scans are kept: SAVE THE PROJECT NOW, then close and reopen ArtecRec."); }   // review B3
   if (abandonStuckPost()) notice(L"A scan took too long to finish processing; it is kept as recorded. You can save now.");
   if (abandonStuckAlign()) { ws::refresh(); notice(L"Auto-align did not finish. Check the scans and save the project."); }
@@ -232,7 +232,7 @@ static void onTimer() {
     if (g_pendingAlign) runAutoAlign();
     else if (g_pendingSave) { g_pendingSave = false; std::wstring t = g_pendingSavePath; bool ok = doSaveNow(t); if (g_pendingClose) { g_pendingClose = false; if (ok) { panel::readSettings(); panel::saveIni(); DestroyWindow(g_hwnd); return; } } } }
   { static clk::time_point lastMem = clk::now(); if (std::chrono::duration<double>(clk::now() - lastMem).count() > 30) { lastMem = clk::now(); if (logic::memLevel(freeGB()) != logic::Mem_Ok && (m == M_Idle || m == M_Record)) { std::wstring cur = g_notice.get(); if (cur.empty() || cur.rfind(L"Memory", 0) == 0) notice(L"Memory is getting low. Save the project and start a new one for the next stone."); logf("low memory: %.1f GB free", freeGB()); } } }   // review E1
-  updateStatus(); view::draw();
+  updateStatus(); { auto td = clk::now(); view::draw(); long long us = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - td).count(); if (us > g_drawMaxUs.load()) g_drawMaxUs = us; }   // R3-03 measurement
 }
 static void jobDone(int gen) {
   if (gen != g_jobGen.load()) return;   // a job abandoned earlier (review B3)
