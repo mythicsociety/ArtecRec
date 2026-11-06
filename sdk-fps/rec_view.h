@@ -153,7 +153,7 @@ static void drawRangeMeter(int w, int h) {
   wchar_t t[32]; glColor3f(0.1f, 0.1f, 0.1f); for (int k = 0; k < 5; k++) { float d = S.nearMm.load() + (S.farMm.load() - S.nearMm.load()) * k / 4; swprintf(t, 32, L"%.0f", d); text(x0 - 34, yOf(d) + 5, t); }
 }
 static void drawGizmo(int w, int h) {
-  float cx = w - 70.f, cy = 70.f, L = 40; float cy_ = cosf(yaw), sy = sinf(yaw), cp = cosf(pitch), sp = sinf(pitch);
+  float cx = w - 70.f, cy = 100.f, L = 40;   /* below the cube strip */ float cy_ = cosf(yaw), sy = sinf(yaw), cp = cosf(pitch), sp = sinf(pitch);
   auto proj = [&](float x, float y, float z, float& ox, float& oy) { float x1 = cy_ * x + sy * z, z1 = -sy * x + cy_ * z; float y2 = cp * y - sp * z1; ox = cx + x1 * L; oy = cy - y2 * L; };
   float ax, ay; glLineWidth(2); glBegin(GL_LINES);
   glColor3f(0.9f, 0.2f, 0.2f); proj(1, 0, 0, ax, ay); glVertex2f(cx, cy); glVertex2f(ax, ay); glColor3f(0.2f, 0.75f, 0.2f); proj(0, 1, 0, ax, ay); glVertex2f(cx, cy); glVertex2f(ax, ay); glColor3f(0.25f, 0.35f, 1.0f); proj(0, 0, 1, ax, ay); glVertex2f(cx, cy); glVertex2f(ax, ay); glEnd(); glLineWidth(1);
@@ -162,10 +162,10 @@ static void drawGizmo(int w, int h) {
 static const wchar_t* cubeLabels[6] = {L"Top", L"Front", L"Left", L"Right", L"Back", L"Bottom"}; static const int cubeViews[6] = {4, 0, 2, 3, 1, 5};
 #define WM_VIEWBTN (WM_APP + 7)   // wParam 1 = Record/Pause, 2 = Stop (full-screen scanning overlay)
 static bool fullView = false;      // panels hidden while scanning: show status + Pause/Stop in the viewport
-static float cubeX(int w) { return (float)std::max(w - 440, 84); }   /* the cube strip keeps right of the Fit button on a narrow view */
+static float cubeX(int w) { return (float)std::max(w - 392, 84); }   /* the cube strip keeps right of the Fit button on a narrow view */
 static void drawButtons(int w, int h) {   // top-left: fit to view; top-right strip: navigation-cube faces
   glColor4f(0, 0, 0, 0.12f); rect(10, 10, 60, 24); glColor3f(0.05f, 0.05f, 0.05f); text(18, 27, L"Fit  (F)");
-  for (int i = 0; i < 6; i++) { glColor4f(0, 0, 0, 0.12f); rect(cubeX(w) + i * 70, 10, 64, 24); glColor3f(0.05f, 0.05f, 0.05f); text(cubeX(w) + 10 + i * 70, 27, cubeLabels[i]); }
+  for (int i = 0; i < 6; i++) { glColor4f(0, 0, 0, 0.12f); rect(cubeX(w) + i * 62, 10, 58, 24); glColor3f(0.05f, 0.05f, 0.05f); text(cubeX(w) + 6 + i * 62, 27, cubeLabels[i]); }
   if (fullView) { int m = g_mode.load(); double secs = g_recSecs + (m == M_Record ? std::chrono::duration<double>(clk::now() - g_recStart).count() : 0); wchar_t t[160], f[32];
     // Readable from 4–5 feet: 54 px fps, 30 px details, 30 px buttons.
     swprintf(f, 32, L"%.1f fps", fpsNow()); swprintf(t, 160, L"Surfaces: %ld     %d:%02d     Failures: %ld", g_frames.load(), (int)secs / 60, (int)secs % 60, g_regFail.load());
@@ -175,7 +175,7 @@ static void drawButtons(int w, int h) {   // top-left: fit to view; top-right st
     if (st) { glColor4f(0.15f, 0.35f, 0.15f, 0.8f); rect(960, h - 78.f, 330, 66); glColor3f(1, 1, 1); textMid(972, h - 34.f, st); }
     glColor4f(0.1f, 0.1f, 0.1f, 0.6f); rect(w - 300.f, h - 80.f, 140, 68); rect(w - 150.f, h - 80.f, 140, 68); glColor3f(1, 1, 1); textMid(w - 290.f, h - 34.f, m == M_Record ? L"Pause" : L"Record"); textMid(w - 112.f, h - 34.f, L"Stop"); }
 }
-static int hitButton(int x, int y, int w, int h) { if (x >= 10 && x <= 70 && y >= 10 && y <= 34) return 100; for (int i = 0; i < 6; i++) if (x >= cubeX(w) + i * 70 && x <= cubeX(w) + 64 + i * 70 && y >= 10 && y <= 34) return cubeViews[i];
+static int hitButton(int x, int y, int w, int h) { if (x >= 10 && x <= 70 && y >= 10 && y <= 34) return 100; for (int i = 0; i < 6; i++) if (x >= cubeX(w) + i * 62 && x <= cubeX(w) + 58 + i * 62 && y >= 10 && y <= 34) return cubeViews[i];
   if (fullView && y >= h - 80 && y <= h - 12) { if (x >= w - 300 && x <= w - 160) return 201; if (x >= w - 150 && x <= w - 10) return 202; } return -1; }
 
 static void render(int w, int h, bool forShot) {
