@@ -57,7 +57,7 @@ Owner: "why should there be a limit at all?" Processing runs until it ends; Edit
 that reports progress and stops reporting for 5 min is treated as hung. Save no longer waits for processing. Global
 registration is run from the Edit menu (owner option A). Tests 100/0/0.
 
-Measured on the field laptop, 15-minute pass (5,269 frames, D:\ArtecDiag	_auto_big):
+Measured on the field laptop, 15-minute pass (5,269 frames, D:\ArtecDiag\t_auto_big):
 
 | Step | Time | Old fixed limit |
 |---|---|---|
