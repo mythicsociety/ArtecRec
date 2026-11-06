@@ -964,15 +964,15 @@ static void runAutoAlign(bool manual = false) {   // aligns the visible scans to
     }
     out->release(); in->release();
     if (gen == g_alignGen.load()) {   // not abandoned: apply, then rebuild the moved scans' display outside the lock
-      for (auto& mv : moves) { ScanRec tmp; { std::lock_guard<std::mutex> l(g_scanMx); bool still = false; for (auto& r : g_scans) if (r.scan == mv.s) { r.scan->setScanTransformation(mv.T); r.placed = true; still = true; } /* cloud review: aligned = anchor, so a later auto-align does not move it again */ if (!still) continue; }
-        tmp.scan = mv.s; buildScanDisplay(tmp); { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.scan == mv.s) { r.disp = std::move(tmp.disp); memcpy(r.texAvg, tmp.texAvg, sizeof r.texAvg); r.hasTexAvg = tmp.hasTexAvg; } } tmp.scan = nullptr; }
+      for (auto& mv : moves) { ScanRec tmp; { std::lock_guard<std::mutex> l(g_scanMx); if (gen != g_alignGen.load()) break; /* R2-02: abandoned meanwhile - apply nothing more */ bool still = false; for (auto& r : g_scans) if (r.scan == mv.s) { r.scan->setScanTransformation(mv.T); r.placed = true; still = true; } /* cloud review: aligned = anchor, so a later auto-align does not move it again */ if (!still) continue; }
+        tmp.scan = mv.s; buildScanDisplay(tmp); { std::lock_guard<std::mutex> l(g_scanMx); if (gen == g_alignGen.load()) for (auto& r : g_scans) if (r.scan == mv.s) { r.disp = std::move(tmp.disp); memcpy(r.texAvg, tmp.texAvg, sizeof r.texAvg); r.hasTexAvg = tmp.hasTexAvg; } } tmp.scan = nullptr; }
       wchar_t m[96]; if (ec == ErrorCode_OK) swprintf(m, 96, L"aligned in %.0f s", secs); else if (ec == ErrorCode_OperationFailed) wcscpy(m, L"could not align the new scan (too little overlap)"); else if (ec == ErrorCode_OperationAborted) wcscpy(m, L"auto-align gave up after 60 s (too little overlap?)"); else swprintf(m, 96, L"align failed (0x%08X)", (unsigned)ec);
-      g_alignMsg = std::wstring(m); PostMessageW(g_hwnd, WM_ALIGNDONE, (WPARAM)gen, 0); }
+      if (gen == g_alignGen.load()) { g_alignMsg = std::wstring(m); PostMessageW(g_hwnd, WM_ALIGNDONE, (WPARAM)gen, 0); } }
     for (auto& it : items) it.s->release();
   });
 }
 // Review B3: an auto-align that ignores its cancel is abandoned after 90 s so the app is usable and the scans can be saved.
-static bool abandonStuckAlign() { if (g_mode.load() != M_Aligning || std::chrono::duration<double>(clk::now() - g_alignStart).count() < 90) return false; ++g_alignGen; if (g_alignThread.joinable()) g_alignThread.detach(); g_mode = M_Idle; logf("auto-align did not end in 90 s: abandoned"); g_alignMsg = L"auto-align did not finish - check the scans; save the project"; return true; }
+static bool abandonStuckAlign() { if (g_mode.load() != M_Aligning || std::chrono::duration<double>(clk::now() - g_alignStart).count() < 90) return false; { std::lock_guard<std::mutex> l(g_scanMx); ++g_alignGen; }   /* R2-02: never between a generation check and an apply */ if (g_alignThread.joinable()) g_alignThread.detach(); g_mode = M_Idle; logf("auto-align did not end in 90 s: abandoned"); g_alignMsg = L"auto-align did not finish - check the scans; save the project"; return true; }
 static void onAlignDone(int gen) { if (gen != g_alignGen.load()) return; if (g_alignThread.joinable()) g_alignThread.join(); rebuildMaster(); g_mode = M_Idle; }
 
 // ---------------------------------------------------------------- project
@@ -1011,11 +1011,21 @@ static bool writeStudioNames(const std::wstring& sproj) {
 // messages, so the window keeps drawing and shows progress, as Studio does. Input is guarded by g_mode == M_Busy.
 static std::atomic<int> g_busyPct{-1}; static std::wstring g_busyText;
 struct Prog : public ProgressInfoBase { void report(int current, int total) override { g_busyPct = total > 0 ? (int)((long long)current * 100 / total) : -1; } void pulse() override {} void notify(DetailsInfo) override {} };
-static ErrorCode runJobPumped(IJob* job, AlgorithmWorkset* ws, const wchar_t* what) {
-  g_busyText = what; g_busyPct = -1; Prog* prog = new Prog(); ws->progress = prog; std::atomic<bool> done{false}; ErrorCode ec = ErrorCode_OK;
-  std::thread t([&] { ec = executeJob(job, ws); done = true; });
-  while (!done.load()) { MSG m; while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); break; } TranslateMessage(&m); DispatchMessageW(&m); } Sleep(20); }
-  t.join(); ws->progress = nullptr; prog->release(); g_busyText.clear(); g_busyPct = -1; return ec;
+// Round 2 (R2-01): a save or open whose SDK job does not return is no longer a dead end. After `askAfterSecs` the user is
+// asked whether to keep waiting; giving up detaches the job (it holds its own references to the job and models, and
+// writes only into its own folder) and returns ErrorCode_OperationAborted. The scans stay in memory.
+struct PumpState { std::atomic<bool> done{false}; ErrorCode ec = ErrorCode_OK; AlgorithmWorkset ws; };
+static ErrorCode runJobPumped(IJob* job, AlgorithmWorkset* ws, const wchar_t* what, int askAfterSecs = 900) {
+  g_busyText = what; g_busyPct = -1; Prog* prog = new Prog(); auto st = std::make_shared<PumpState>(); st->ws = *ws; st->ws.progress = prog;
+  job->addRef(); if (st->ws.in) st->ws.in->addRef(); if (st->ws.out) st->ws.out->addRef(); prog->addRef();
+  std::thread t([st, job, prog] { st->ec = executeJob(job, &st->ws); if (st->ws.in) st->ws.in->release(); if (st->ws.out) st->ws.out->release(); job->release(); prog->release(); st->done = true; });
+  auto t0 = clk::now(); bool abandoned = false;
+  while (!st->done.load()) { MSG m; while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); break; } TranslateMessage(&m); DispatchMessageW(&m); } Sleep(20);
+    if (std::chrono::duration<double>(clk::now() - t0).count() > askAfterSecs) {
+      wchar_t q[400]; swprintf(q, 400, L"%s has been running for %d minutes without finishing.\n\nKeep waiting?\n\nYes = wait %d more minutes.\nNo = give up. Your scans stay in ArtecRec; save them again, if possible to another folder or drive.", what, (int)(std::chrono::duration<double>(clk::now() - t0).count() / 60), askAfterSecs / 60);
+      if (MessageBoxW(g_hwnd, q, L"ArtecRec", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1) == IDYES) t0 = clk::now(); else if (!st->done.load()) { abandoned = true; break; } } }
+  if (abandoned) { logf("%ls: no result after the time limit; given up by the user (job left to finish on its own)", what); t.detach(); } else t.join();
+  ws->progress = nullptr; prog->release(); g_busyText.clear(); g_busyPct = -1; return abandoned ? ErrorCode_OperationAborted : st->ec;
 }
 static bool removeDir(const std::wstring& dir) { std::wstring dz = dir; dz.push_back(L'\0'); SHFILEOPSTRUCTW op = {}; op.wFunc = FO_DELETE; op.pFrom = dz.c_str(); op.fFlags = FOF_NO_UI; return SHFileOperationW(&op) == 0; }
 static bool dirExists(const std::wstring& d) { DWORD a = GetFileAttributesW(d.c_str()); return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY); }
@@ -1050,6 +1060,7 @@ static bool saveProject(const std::wstring& sproj) {
   AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = snap; ws.threadsCount = std::thread::hardware_concurrency();
   auto t0 = clk::now(); ec = runJobPumped(saver, &ws, L"Saving project..."); saver->release(); p->release(); snap->release();
   logf("save 0x%08X %.1f s -> %s%s", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), logic::utf8(sproj).c_str(), swap ? " (replacing the existing copy; the old one is kept as __previous)" : "");
+  if (ec == ErrorCode_OperationAborted) { g_saveErr = L"Saving was given up. The unfinished copy is in\n" + outDir + L"\n(do not use it). " + (swap ? L"The previous copy of the project is unchanged. " : L"") + L"Save again, if possible to another folder or drive."; return false; }   // R2-01
   if (ec != ErrorCode_OK) { if (swap || created) removeDir(outDir); g_saveErr = L"The scanner software reported an error while saving (code " + std::to_wstring((unsigned)ec) + L")." + (swap ? L" The previous copy of the project is unchanged." : L" Nothing was kept; save again, if possible to another drive."); return false; }
   // second outside review (F01): the older backup is set aside, not deleted, until the new project is in place
   if (swap) { std::wstring prev = dir + L"__previous", older = dir + L"__previous_old"; bool hadPrev = dirExists(prev);
