@@ -61,21 +61,27 @@ static std::wstring g_benchCsv, g_scriptPath; static bool g_benchMid = false;
 namespace bench {
 static bool active = false; static std::wstring out; static int phase = 0, run = -1, scanIdx = -1, countBefore = 0, fedAtJoin = 0, tries = 0; static const int LIMIT = 150;
 static clk::time_point t0, tJoin; static bool sawJoin = false, liveJoined = false; static double errStop = -1; static Matrix4x4D truth;
-static std::vector<int> order; static std::vector<std::pair<IScan*, Matrix4x4D>> anchors; static int nOk = 0, nWrong = 0, nAligned = 0, nAlignedWrong = 0, nNot = 0, nAnchorMoved = 0;
+static std::vector<int> order; static std::vector<std::pair<IScan*, Matrix4x4D>> anchors; static int nOk = 0, nWrong = 0, nAligned = 0, nAlignedWrong = 0, nNot = 0, nAnchorMoved = 0, nUncertain = 0, nNoOverlap = 0;
+static double truthMoved = -1, truthShare = 0; static bool truthOk = false;   /* the saved position checked against the other passes before the run (owner, 7 Nov: "i am not sure all passes in those projects are already placed right") */
 static double dist(const double A[4][4], const double B[4][4]) { return sqrt((A[0][3] - B[0][3]) * (A[0][3] - B[0][3]) + (A[1][3] - B[1][3]) * (A[1][3] - B[1][3]) + (A[2][3] - B[2][3]) * (A[2][3] - B[2][3])); }
 // where three frames of the replayed pass ended up (T * F') against where the saved project has them (ScanT * F)
 static double errOf(IScan* src, const Matrix4x4D& T) { int n = src->getSize(); if (n <= 0) return -1; double e = 0; for (int k : {0, n / 2, n - 1}) { double Fp[4][4], A[4][4], B[4][4]; mul44(replay::F0inv.m, src->getTransformation(k).m, Fp); mul44(T.m, Fp, A); mul44(truth.m, src->getTransformation(k).m, B); double d = dist(A, B); if (d > e) e = d; } return e; }
 static void line(const std::string& s) { FILE* f = _wfopen(out.c_str(), L"ab"); if (f) { fputs(s.c_str(), f); fputs("\n", f); fclose(f); } }
 static double secs(clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); }
-static void finish() { active = false; char b[300]; snprintf(b, sizeof b, "replay bench done: %d run(s); joined ok %d, joined wrong %d, aligned ok %d, aligned wrong %d, not placed %d, anchors moved %d", run + 1, nOk, nWrong, nAligned, nAlignedWrong, nNot, nAnchorMoved); logf("%s", b); line(std::string("# ") + b); g_dirty = false; autosaveCovered(false); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }
+static void finish() { active = false; char b[300]; snprintf(b, sizeof b, "replay bench done: %d run(s); joined ok %d, joined wrong %d, aligned ok %d, aligned wrong %d, not placed %d, anchors moved %d; saved position uncertain %d, no overlap as saved %d", run + 1, nOk, nWrong, nAligned, nAlignedWrong, nNot, nAnchorMoved, nUncertain, nNoOverlap); logf("%s", b); line(std::string("# ") + b); g_dirty = false; autosaveCovered(false); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }
 static void begin(const std::wstring& csv) { out = csv; active = true; phase = 0; run = -1; order.clear(); for (int i = 0; i < (int)g_scans.size(); i++) if (g_scans[i].scan && g_scans[i].scan->getSize() >= 20) order.push_back(i);
-  if (GetFileAttributesW(out.c_str()) == INVALID_FILE_ATTRIBUTES) line("project,scan,name,frames,fed,liveJoined,tries,joinSecs,errStopMm,errFinalMm,anchorsMovedMm,result"); logf("replay bench: %d run(s) on %s", (int)order.size(), logic::utf8(g_projPath).c_str()); }
+  if (GetFileAttributesW(out.c_str()) == INVALID_FILE_ATTRIBUTES) line("project,scan,name,frames,fed,liveJoined,tries,joinSecs,errStopMm,errFinalMm,anchorsMovedMm,truthMovedMm,truthShare,result"); logf("replay bench: %d run(s) on %s", (int)order.size(), logic::utf8(g_projPath).c_str()); }
 static void step() {
   int m = g_mode.load();
   if (phase == 0) { if (m != M_Idle || !postIdle() || g_pendingAlign) return;
     if (run + 1 >= (int)order.size()) { finish(); return; }
     run++; scanIdx = order[run]; if (scanIdx >= (int)g_scans.size() || !g_scans[scanIdx].scan) return;
-    IScan* src = g_scans[scanIdx].scan; truth = src->getScanTransformation(); g_scans[scanIdx].visible = false; ws::refresh();
+    IScan* src = g_scans[scanIdx].scan; truth = src->getScanTransformation();
+    // truth check: does this pass, as saved, fit the other passes? (pa::refine against the visible others, not applied)
+    { Matrix4x4D nT; double rms = 0, rot = 0; truthMoved = -1; truthShare = 0; if (pa::refine(src, nT, truthMoved, rms, rot, truthShare)) truthOk = truthMoved <= 2.0 && truthShare >= 0.5; else { truthMoved = -1; truthOk = false; }
+      logf("replay bench: saved position of scan %d \"%ls\": %s (would move %.1f mm, %.0f%% of points on the other passes)", scanIdx + 1, g_scans[scanIdx].name.c_str(), truthMoved < 0 ? "no overlap with the other passes" : truthOk ? "consistent" : "NOT consistent", truthMoved, truthShare * 100);
+      if (truthMoved < 0) { nNoOverlap++; char b[400]; snprintf(b, sizeof b, "%s,%d,%s,%d,0,0,0,-1.0,-1.00,-1.00,0.00,-1.00,0.00,NO_OVERLAP_SAVED", logic::utf8(logic::leafOf(g_projPath)).c_str(), scanIdx + 1, logic::utf8(g_scans[scanIdx].name).c_str(), src->getSize()); line(b); return; } }
+    g_scans[scanIdx].visible = false; ws::refresh();
     anchors.clear(); for (int i = 0; i < (int)g_scans.size(); i++) if (i != scanIdx && g_scans[i].scan) anchors.push_back({g_scans[i].scan, g_scans[i].scan->getScanTransformation()});
     countBefore = (int)g_scans.size(); int from = g_benchMid ? src->getSize() / 2 : 0; replay::setSource(src, from, std::min(src->getSize(), from + LIMIT)); sawJoin = liveJoined = false; errStop = -1; tries = 0; t0 = clk::now();
     logf("replay bench: run %d/%d, scan %d \"%ls\" (%d frames) replayed against %d other scan(s)", run + 1, (int)order.size(), scanIdx + 1, g_scans[scanIdx].name.c_str(), src->getSize(), (int)anchors.size());
@@ -90,8 +96,8 @@ static void step() {
     if (added) { auto& r = g_scans.back(); placedFinal = r.placed; if (r.scan) errFinal = errOf(src, r.scan->getScanTransformation()); }
     double moved = 0; for (auto& a : anchors) for (auto& r : g_scans) if (r.scan == a.first) { Matrix4x4D T = r.scan->getScanTransformation(); double d = dist(T.m, a.second.m); if (d > moved) moved = d; }
     logic::BenchResult v = logic::benchVerdict(liveJoined, placedFinal, errFinal); static const char* vs[] = {"JOINED_OK", "JOINED_WRONG", "ALIGNED_OK", "ALIGNED_WRONG", "NOT_PLACED"};
-    if (v == logic::B_JoinedOk) nOk++; else if (v == logic::B_JoinedWrong) nWrong++; else if (v == logic::B_AlignedOk) nAligned++; else if (v == logic::B_AlignedWrong) nAlignedWrong++; else nNot++; if (!logic::anchorsHeld(moved)) nAnchorMoved++;
-    char b[700]; snprintf(b, sizeof b, "%s,%d,%s,%d,%d,%d,%d,%.1f,%.2f,%.2f,%.2f,%s%s", logic::utf8(logic::leafOf(g_projPath)).c_str(), scanIdx + 1, logic::utf8(g_scans[scanIdx].name).c_str(), src->getSize(), replay::fed.load(), liveJoined ? 1 : 0, tries, sawJoin ? secs(t0, tJoin) : -1.0, errStop, errFinal, moved, vs[v], logic::anchorsHeld(moved) ? "" : "+ANCHOR_MOVED");
+    if (!truthOk) nUncertain++; else if (v == logic::B_JoinedOk) nOk++; else if (v == logic::B_JoinedWrong) nWrong++; else if (v == logic::B_AlignedOk) nAligned++; else if (v == logic::B_AlignedWrong) nAlignedWrong++; else nNot++; if (!logic::anchorsHeld(moved)) nAnchorMoved++;
+    char b[700]; snprintf(b, sizeof b, "%s,%d,%s,%d,%d,%d,%d,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%s%s%s", logic::utf8(logic::leafOf(g_projPath)).c_str(), scanIdx + 1, logic::utf8(g_scans[scanIdx].name).c_str(), src->getSize(), replay::fed.load(), liveJoined ? 1 : 0, tries, sawJoin ? secs(t0, tJoin) : -1.0, errStop, errFinal, moved, truthMoved, truthShare, vs[v], logic::anchorsHeld(moved) ? "" : "+ANCHOR_MOVED", truthOk ? "" : "?TRUTH");
     line(b); logf("replay bench: %s", b);
     if (added) { std::lock_guard<std::mutex> l(g_scanMx); auto& r = g_scans.back(); if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); g_scans.pop_back(); }
     g_scans[scanIdx].visible = true; rebuildMaster(); view::selectedScan = -1; ws::refresh(); phase = 0; return; }
