@@ -3,6 +3,9 @@
 // Space Spider on the HP ZBook: USB packet clamped to 960 B via flyhook.h (env FLYPKT overrides).
 #include "rec_sdk.h"
 #include "rec_replay.h"
+#include <artec/sdk/base/io/PlyIO.h>
+#include <artec/sdk/base/io/ObjIO.h>
+#include <artec/sdk/base/io/StlIO.h>
 #include "rec_view.h"
 #include "rec_panel.h"
 #include "rec_ws.h"
@@ -62,15 +65,39 @@ namespace bench {
 static bool active = false; static std::wstring out; static int phase = 0, run = -1, scanIdx = -1, countBefore = 0, fedAtJoin = 0, tries = 0; static const int LIMIT = 150;
 static clk::time_point t0, tJoin; static bool sawJoin = false, liveJoined = false; static double errStop = -1; static Matrix4x4D truth;
 static std::vector<int> order; static std::vector<std::pair<IScan*, Matrix4x4D>> anchors; static int nOk = 0, nWrong = 0, nAligned = 0, nAlignedWrong = 0, nNot = 0, nAnchorMoved = 0, nUncertain = 0, nNoOverlap = 0;
-static double truthMoved = -1, truthShare = 0; static bool truthOk = false;   /* the saved position checked against the other passes before the run (owner, 7 Nov: "i am not sure all passes in those projects are already placed right") */
+static double truthMoved = -1, truthShare = 0; static bool truthOk = false;
+// Finished model (owner, 7 Nov: "the finished models for these projects exist"): the fused, fully aligned surface from
+// D:\ArtecReplay\models\<corpus folder>\*.ply|obj|stl. A pass is judged by the share of its points within 2 mm of it,
+// independent of the saved pass positions. The model's frame is checked against the saved passes first (and fitted
+// to them with ICP if it was exported in another frame).
+static pa::Model model; static bool haveModel = false; static double modelC[4][4]; static double modelFrameShare = 0, truthModelFit = -1; static int nModelOk = 0, nModelOff = 0;
+static double shareOn(const std::vector<float>& P, float maxd) { int n = (int)P.size() / 3, hit = 0; for (int i = 0; i < n; i++) { float q[3] = {P[i * 3], P[i * 3 + 1], P[i * 3 + 2]}; if (!isIdentity(modelC)) { float x = (float)(modelC[0][0] * q[0] + modelC[0][1] * q[1] + modelC[0][2] * q[2] + modelC[0][3]), y = (float)(modelC[1][0] * q[0] + modelC[1][1] * q[1] + modelC[1][2] * q[2] + modelC[1][3]), z = (float)(modelC[2][0] * q[0] + modelC[2][1] * q[1] + modelC[2][2] * q[2] + modelC[2][3]); q[0] = x; q[1] = y; q[2] = z; } const float* pp; const float* nn; if (model.nearest(q, maxd, pp, nn)) hit++; } return n ? (double)hit / n : 0; }
+static bool loadModel() {
+  haveModel = false; setIdentity(modelC); model = pa::Model(); std::wstring corpusDir = projDir(projDir(g_projPath)); std::wstring mdir = L"D:\\ArtecReplay\\models\\" + logic::leafOf(corpusDir); std::wstring file;
+  for (auto& e : listFolder(mdir)) { if (e.dir) continue; std::wstring l = e.name; for (auto& ch : l) ch = towlower(ch); if (l.size() > 4 && (l.compare(l.size() - 4, 4, L".ply") == 0 || l.compare(l.size() - 4, 4, L".obj") == 0 || l.compare(l.size() - 4, 4, L".stl") == 0)) { file = mdir + L"\\" + e.name; break; } }
+  if (file.empty()) { logf("replay bench: no finished model for %s", logic::utf8(logic::leafOf(corpusDir)).c_str()); return false; }
+  auto t0 = clk::now(); IMesh* mesh = nullptr; std::wstring l = file; for (auto& ch : l) ch = towlower(ch); ErrorCode ec;
+  if (l.compare(l.size() - 4, 4, L".stl") == 0) ec = io::Stl::load(&mesh, file.c_str()); else { IFrameMesh* fm = nullptr; if (l.compare(l.size() - 4, 4, L".ply") == 0) ec = io::Ply::load(&fm, nullptr, file.c_str()); else ec = io::Obj::load(&fm, file.c_str()); mesh = fm; }
+  if (ec != ErrorCode_OK || !mesh) { logf("replay bench: finished model %s could not be loaded (0x%08X)", logic::utf8(file).c_str(), (unsigned)ec); return false; }
+  if (!mesh->hasPointsNormals()) mesh->calculate(CM_PointsNormals_Default);
+  IArrayPoint3F* pts = mesh->getPoints(); IArrayPoint3F* nrm = mesh->getPointsNormals(); int n = pts ? pts->getSize() : 0; int step = std::max(1, n / 400000);
+  if (n && nrm) { const Point3F* p = pts->getPointer(); const Point3F* q = nrm->getPointer(); for (int i = 0; i < n; i += step) { model.pts.push_back(p[i].x); model.pts.push_back(p[i].y); model.pts.push_back(p[i].z); model.nrm.push_back(q[i].x); model.nrm.push_back(q[i].y); model.nrm.push_back(q[i].z); } }
+  mesh->release(); if (model.pts.size() < 3000 * 3) { logf("replay bench: finished model too small"); return false; } model.build();
+  // frame check: the saved passes against the model; if they do not sit on it, fit them to it (ICP) and keep that correction
+  std::vector<float> P; { std::lock_guard<std::mutex> lk(g_scanMx); for (auto& rec : g_scans) if (rec.scan && rec.ref) pa::worldPts(rec.ref, 1, 10, false, P, nullptr, rec.scan->getScanTransformation().m); }
+  modelFrameShare = shareOn(P, 2.0f);
+  if (modelFrameShare < 0.6 && P.size() >= 1500 * 3) { double R[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, t[3] = {0, 0, 0}; int matched = 0; double rms = 0; bool ok = true; for (int it = 0; it < 24 && ok; it++) ok = pa::step(P, model, R, t, it < 6 ? 40.0f : it < 12 ? 15.0f : it < 18 ? 6.0f : 2.0f, rms, matched);
+    if (ok) { for (int r = 0; r < 3; r++) { for (int c = 0; c < 3; c++) modelC[r][c] = R[r][c]; modelC[r][3] = t[r]; } double s2 = shareOn(P, 2.0f); logf("replay bench: finished model was in another frame; after fitting the saved passes to it: %.0f%% on the model (was %.0f%%)", s2 * 100, modelFrameShare * 100); modelFrameShare = s2; } }
+  haveModel = modelFrameShare >= 0.6; logf("replay bench: finished model %s: %d points used, loaded in %.0f s; %.0f%% of the saved passes' points lie within 2 mm of it -> %s", logic::utf8(logic::leafOf(file)).c_str(), (int)model.pts.size() / 3, std::chrono::duration<double>(clk::now() - t0).count(), modelFrameShare * 100, haveModel ? "used as the reference" : "NOT used (the model does not match the project)");
+  return haveModel; }   /* the saved position checked against the other passes before the run (owner, 7 Nov: "i am not sure all passes in those projects are already placed right") */
 static double dist(const double A[4][4], const double B[4][4]) { return sqrt((A[0][3] - B[0][3]) * (A[0][3] - B[0][3]) + (A[1][3] - B[1][3]) * (A[1][3] - B[1][3]) + (A[2][3] - B[2][3]) * (A[2][3] - B[2][3])); }
 // where three frames of the replayed pass ended up (T * F') against where the saved project has them (ScanT * F)
 static double errOf(IScan* src, const Matrix4x4D& T) { int n = src->getSize(); if (n <= 0) return -1; double e = 0; for (int k : {0, n / 2, n - 1}) { double Fp[4][4], A[4][4], B[4][4]; mul44(replay::F0inv.m, src->getTransformation(k).m, Fp); mul44(T.m, Fp, A); mul44(truth.m, src->getTransformation(k).m, B); double d = dist(A, B); if (d > e) e = d; } return e; }
 static void line(const std::string& s) { FILE* f = _wfopen(out.c_str(), L"ab"); if (f) { fputs(s.c_str(), f); fputs("\n", f); fclose(f); } }
 static double secs(clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); }
-static void finish() { active = false; char b[300]; snprintf(b, sizeof b, "replay bench done: %d run(s); joined ok %d, joined wrong %d, aligned ok %d, aligned wrong %d, not placed %d, anchors moved %d; saved position uncertain %d, no overlap as saved %d", run + 1, nOk, nWrong, nAligned, nAlignedWrong, nNot, nAnchorMoved, nUncertain, nNoOverlap); logf("%s", b); line(std::string("# ") + b); g_dirty = false; autosaveCovered(false); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }
+static void finish() { active = false; char b[300]; snprintf(b, sizeof b, "replay bench done: %d run(s); joined ok %d, joined wrong %d, aligned ok %d, aligned wrong %d, not placed %d, anchors moved %d; saved position uncertain %d, no overlap as saved %d; on the finished model ok %d, off %d", run + 1, nOk, nWrong, nAligned, nAlignedWrong, nNot, nAnchorMoved, nUncertain, nNoOverlap, nModelOk, nModelOff); logf("%s", b); line(std::string("# ") + b); g_dirty = false; autosaveCovered(false); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }
 static void begin(const std::wstring& csv) { out = csv; active = true; phase = 0; run = -1; order.clear(); for (int i = 0; i < (int)g_scans.size(); i++) if (g_scans[i].scan && g_scans[i].scan->getSize() >= 20) order.push_back(i);
-  if (GetFileAttributesW(out.c_str()) == INVALID_FILE_ATTRIBUTES) line("project,scan,name,frames,fed,liveJoined,tries,joinSecs,errStopMm,errFinalMm,anchorsMovedMm,truthMovedMm,truthShare,result"); logf("replay bench: %d run(s) on %s", (int)order.size(), logic::utf8(g_projPath).c_str()); }
+  if (GetFileAttributesW(out.c_str()) == INVALID_FILE_ATTRIBUTES) line("project,scan,name,frames,fed,liveJoined,tries,joinSecs,errStopMm,errFinalMm,anchorsMovedMm,truthMovedMm,truthShare,modelFit,truthModelFit,result"); logf("replay bench: %d run(s) on %s", (int)order.size(), logic::utf8(g_projPath).c_str()); loadModel(); }
 static void step() {
   int m = g_mode.load();
   if (phase == 0) { if (m != M_Idle || !postIdle() || g_pendingAlign) return;
@@ -80,7 +107,8 @@ static void step() {
     // truth check: does this pass, as saved, fit the other passes? (pa::refine against the visible others, not applied)
     { Matrix4x4D nT; double rms = 0, rot = 0; truthMoved = -1; truthShare = 0; if (pa::refine(src, nT, truthMoved, rms, rot, truthShare)) truthOk = truthMoved <= 2.0 && truthShare >= 0.5; else { truthMoved = -1; truthOk = false; }
       logf("replay bench: saved position of scan %d \"%ls\": %s (would move %.1f mm, %.0f%% of points on the other passes)", scanIdx + 1, g_scans[scanIdx].name.c_str(), truthMoved < 0 ? "no overlap with the other passes" : truthOk ? "consistent" : "NOT consistent", truthMoved, truthShare * 100);
-      if (truthMoved < 0) { nNoOverlap++; char b[400]; snprintf(b, sizeof b, "%s,%d,%s,%d,0,0,0,-1.0,-1.00,-1.00,0.00,-1.00,0.00,NO_OVERLAP_SAVED", logic::utf8(logic::leafOf(g_projPath)).c_str(), scanIdx + 1, logic::utf8(g_scans[scanIdx].name).c_str(), src->getSize()); line(b); return; } }
+      if (truthMoved < 0) { nNoOverlap++; char b[400]; snprintf(b, sizeof b, "%s,%d,%s,%d,0,0,0,-1.0,-1.00,-1.00,0.00,-1.00,0.00,-1.00,-1.00,NO_OVERLAP_SAVED", logic::utf8(logic::leafOf(g_projPath)).c_str(), scanIdx + 1, logic::utf8(g_scans[scanIdx].name).c_str(), src->getSize()); line(b); return; } }
+    truthModelFit = -1; if (haveModel) { std::vector<float> P; pa::worldPts(src, std::max(1, src->getSize() / 40), 20, false, P, nullptr); truthModelFit = shareOn(P, 2.0f); }
     g_scans[scanIdx].visible = false; ws::refresh();
     anchors.clear(); for (int i = 0; i < (int)g_scans.size(); i++) if (i != scanIdx && g_scans[i].scan) anchors.push_back({g_scans[i].scan, g_scans[i].scan->getScanTransformation()});
     countBefore = (int)g_scans.size(); int from = g_benchMid ? src->getSize() / 2 : 0; replay::setSource(src, from, std::min(src->getSize(), from + LIMIT)); sawJoin = liveJoined = false; errStop = -1; tries = 0; t0 = clk::now();
@@ -96,8 +124,9 @@ static void step() {
     if (added) { auto& r = g_scans.back(); placedFinal = r.placed; if (r.scan) errFinal = errOf(src, r.scan->getScanTransformation()); }
     double moved = 0; for (auto& a : anchors) for (auto& r : g_scans) if (r.scan == a.first) { Matrix4x4D T = r.scan->getScanTransformation(); double d = dist(T.m, a.second.m); if (d > moved) moved = d; }
     logic::BenchResult v = logic::benchVerdict(liveJoined, placedFinal, errFinal); static const char* vs[] = {"JOINED_OK", "JOINED_WRONG", "ALIGNED_OK", "ALIGNED_WRONG", "NOT_PLACED"};
+    double modelFit = -1; const char* ms = ""; if (haveModel && added && g_scans.back().scan) { std::vector<float> P; pa::worldPts(g_scans.back().scan, std::max(1, g_scans.back().scan->getSize() / 40), 20, false, P, nullptr); modelFit = shareOn(P, 2.0f); bool mok = modelFit >= std::max(0.6, 0.8 * truthModelFit); ms = mok ? "+MODEL_OK" : "+MODEL_OFF"; if (mok) nModelOk++; else nModelOff++; }
     if (!truthOk) nUncertain++; else if (v == logic::B_JoinedOk) nOk++; else if (v == logic::B_JoinedWrong) nWrong++; else if (v == logic::B_AlignedOk) nAligned++; else if (v == logic::B_AlignedWrong) nAlignedWrong++; else nNot++; if (!logic::anchorsHeld(moved)) nAnchorMoved++;
-    char b[700]; snprintf(b, sizeof b, "%s,%d,%s,%d,%d,%d,%d,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%s%s%s", logic::utf8(logic::leafOf(g_projPath)).c_str(), scanIdx + 1, logic::utf8(g_scans[scanIdx].name).c_str(), src->getSize(), replay::fed.load(), liveJoined ? 1 : 0, tries, sawJoin ? secs(t0, tJoin) : -1.0, errStop, errFinal, moved, truthMoved, truthShare, vs[v], logic::anchorsHeld(moved) ? "" : "+ANCHOR_MOVED", truthOk ? "" : "?TRUTH");
+    char b[800]; snprintf(b, sizeof b, "%s,%d,%s,%d,%d,%d,%d,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%s%s%s%s", logic::utf8(logic::leafOf(g_projPath)).c_str(), scanIdx + 1, logic::utf8(g_scans[scanIdx].name).c_str(), src->getSize(), replay::fed.load(), liveJoined ? 1 : 0, tries, sawJoin ? secs(t0, tJoin) : -1.0, errStop, errFinal, moved, truthMoved, truthShare, modelFit, truthModelFit, vs[v], logic::anchorsHeld(moved) ? "" : "+ANCHOR_MOVED", truthOk ? "" : "?TRUTH", ms);
     line(b); logf("replay bench: %s", b);
     if (added) { std::lock_guard<std::mutex> l(g_scanMx); auto& r = g_scans.back(); if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); g_scans.pop_back(); }
     g_scans[scanIdx].visible = true; rebuildMaster(); view::selectedScan = -1; ws::refresh(); phase = 0; return; }
