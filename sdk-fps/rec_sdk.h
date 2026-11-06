@@ -814,7 +814,7 @@ static PostGate g_postGate;
 // Second review: a tidy-up whose SDK step ignores its cancel must not block saving for good. Each item is tracked;
 // after 4 minutes the UI gives it up (count lowered, gate slot freed), and a late result is thrown away.
 struct PostItem { IScan* s; clk::time_point t0; std::mutex m; bool done = false, abandoned = false, gated = false; };
-static std::mutex g_itemsMx; static std::vector<std::shared_ptr<PostItem>> g_items;
+static std::mutex g_itemsMx; static std::vector<std::shared_ptr<PostItem>> g_items; static std::atomic<int> g_lostPosts{0};   // results that could not be delivered
 static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> item) {   // s carries one reference for this thread; g_postBusy was raised by startPostProcess
   g_postGate.enter(); { std::lock_guard<std::mutex> l(item->m); if (item->abandoned) { g_postGate.leave(); s->release(); return; } item->gated = true; item->t0 = clk::now(); } auto t0 = clk::now(); int nf = s->getSize(); IScan* r = nullptr;
   if (optimise && nf >= 1) {
@@ -863,14 +863,15 @@ static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> i
   pr->ref = nf >= 3 ? buildRef(pr->res, 40) : nullptr;
   if (g_featSearch && nf >= 3) pr->feats = buildFeats(pr->res, 40);
   { std::lock_guard<std::mutex> l(item->m); if (item->abandoned) { if (pr->ref) pr->ref->release(); if (pr->res && pr->res != pr->src) pr->res->release(); pr->src->release(); delete pr; return; } item->done = true; g_postGate.leave(); }
-  if (!PostMessageW(g_hwnd, WM_POSTDONE, 0, (LPARAM)pr)) { logf("tidy-up result could not be delivered (window gone)"); }
+  { bool posted = false; for (int t = 0; t < 50 && !(posted = PostMessageW(g_hwnd, WM_POSTDONE, 0, (LPARAM)pr) != 0); t++) std::this_thread::sleep_for(std::chrono::milliseconds(100));   // second outside review (F03)
+    if (!posted) { logf("tidy-up result could not be delivered (error %lu): dropped, scan kept as recorded", GetLastError()); if (pr->ref) pr->ref->release(); if (pr->res && pr->res != pr->src) pr->res->release(); pr->src->release(); delete pr; g_lostPosts++; } }
 }
 // Review C3/A3/E3: the busy count is raised here, on the UI thread, before the thread exists, and lowered by
 // onPostDone on the UI thread after the result is swapped in. postIdle() is therefore exact: no queued result exists.
 // Threads are detached: each holds its own references, and nothing waits for them at exit (review B6).
 static void startPostProcess(IScan* s, bool optimise = true) { s->addRef(); g_postBusy++; g_optimising = true; auto it = std::make_shared<PostItem>(); it->s = s; it->t0 = clk::now(); { std::lock_guard<std::mutex> l(g_itemsMx); g_items.push_back(it); } std::thread(postProcessScan, s, optimise, it).detach(); }
 // UI timer: give up a tidy-up running for more than 4 minutes (the scan stays as recorded). Returns true if one was given up.
-static bool abandonStuckPost() { bool any = false; std::lock_guard<std::mutex> l(g_itemsMx);
+static bool abandonStuckPost() { bool any = false; for (int lp = g_lostPosts.exchange(0); lp > 0; lp--) { if (g_postBusy.load() > 0) g_postBusy--; any = true; } std::lock_guard<std::mutex> l(g_itemsMx);
   for (auto it = g_items.begin(); it != g_items.end();) { auto& p = *it; bool drop = false; { std::lock_guard<std::mutex> lk(p->m); if (p->done) drop = true; else if (p->gated && std::chrono::duration<double>(clk::now() - p->t0).count() > 360) { p->abandoned = true; drop = true; any = true; g_postGate.leave(); if (g_postBusy.load() > 0) g_postBusy--; } }
     if (drop) it = g_items.erase(it); else ++it; }
   if (any) { logf("a scan's processing did not finish in 6 min: given up, the scan is kept as recorded"); g_optimising = g_postBusy.load() > 0; } return any; }
@@ -998,10 +999,10 @@ static void loadGroups(const std::wstring& sproj) {
 }
 // The SDK's project writer names scans "Scan 0, 1, ...". Rewrite the Name="..." attributes in the .sproj XML (in scan
 // order) to "<group> - <name>" so Studio shows the ArtecRec names and groups. UTF-8, atomic (review A5).
-static void writeStudioNames(const std::wstring& sproj) {
-  FILE* f = _wfopen(sproj.c_str(), L"rb"); if (!f) return; std::string x; char buf[4096]; size_t n; while ((n = fread(buf, 1, sizeof buf, f)) > 0) x.append(buf, n); fclose(f);
+static bool writeStudioNames(const std::wstring& sproj) {
+  FILE* f = _wfopen(sproj.c_str(), L"rb"); if (!f) { logf("studio names: project file not readable"); return false; } std::string x; char buf[4096]; size_t n; while ((n = fread(buf, 1, sizeof buf, f)) > 0) x.append(buf, n); fclose(f);
   std::vector<std::wstring> names; for (auto& sc : g_scans) names.push_back(sc.group >= 0 && sc.group < (int)g_groups.size() ? g_groups[sc.group].name + L" - " + sc.name : sc.name);
-  int k = logic::rewriteScanNames(x, names); if (!writeFileAtomic(sproj, x)) { logf("studio names could not be written"); return; } logf("studio names written for %d scans", k);
+  int k = logic::rewriteScanNames(x, names); if (!writeFileAtomic(sproj, x)) { logf("studio names could not be written"); return false; } logf("studio names written for %d of %d scans", k, (int)names.size()); return k == (int)names.size();
 }
 // Long SDK jobs (save: 287 s for a 4.9 GB project on 2 Nov; open) run in a worker thread while the UI thread pumps
 // messages, so the window keeps drawing and shows progress, as Studio does. Input is guarded by g_mode == M_Busy.
@@ -1047,11 +1048,17 @@ static bool saveProject(const std::wstring& sproj) {
   auto t0 = clk::now(); ec = runJobPumped(saver, &ws, L"Saving project..."); saver->release(); p->release(); snap->release();
   logf("save 0x%08X %.1f s -> %s%s", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), logic::utf8(sproj).c_str(), swap ? " (replacing the existing copy; the old one is kept as __previous)" : "");
   if (ec != ErrorCode_OK) { if (swap || created) removeDir(outDir); g_saveErr = L"The scanner software reported an error while saving (code " + std::to_wstring((unsigned)ec) + L")." + (swap ? L" The previous copy of the project is unchanged." : L" Nothing was kept; save again, if possible to another drive."); return false; }
-  if (swap) { std::wstring prev = dir + L"__previous"; if (dirExists(prev)) removeDir(prev);
-    if (!MoveFileExW(dir.c_str(), prev.c_str(), 0)) { DWORD e = GetLastError(); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nbut the old folder could not be moved aside (error " + std::to_wstring(e) + L"; is a window open on it?). Close Explorer windows on it and save again."; logf("could not move the old project folder aside (error %lu)", e); return false; }
-    if (!MoveFileExW(outDir.c_str(), dir.c_str(), 0)) { DWORD e = GetLastError(); MoveFileExW(prev.c_str(), dir.c_str(), 0); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nand the old project is unchanged (error " + std::to_wstring(e) + L")."; logf("could not move the new project folder in (error %lu)", e); return false; } }
+  // second outside review (F01): the older backup is set aside, not deleted, until the new project is in place
+  if (swap) { std::wstring prev = dir + L"__previous", older = dir + L"__previous_old"; bool hadPrev = dirExists(prev);
+    if (hadPrev) { if (dirExists(older)) removeDir(older); if (!MoveFileExW(prev.c_str(), older.c_str(), 0)) { DWORD e = GetLastError(); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nbut the older backup could not be set aside (error " + std::to_wstring(e) + L"). Nothing else was changed."; logf("could not set the older backup aside (error %lu)", e); return false; } }
+    auto restorePrev = [&] { if (hadPrev && !MoveFileExW(older.c_str(), prev.c_str(), 0)) logf("could not restore %s (error %lu)", logic::utf8(prev).c_str(), GetLastError()); };
+    if (!MoveFileExW(dir.c_str(), prev.c_str(), 0)) { DWORD e = GetLastError(); restorePrev(); g_saveErr = L"The new copy is saved in\n" + outDir + L"\nbut the old folder could not be moved aside (error " + std::to_wstring(e) + L"; is a window open on it?). Close Explorer windows on it and save again."; logf("could not move the old project folder aside (error %lu)", e); return false; }
+    if (!MoveFileExW(outDir.c_str(), dir.c_str(), 0)) { DWORD e = GetLastError(); bool back = MoveFileExW(prev.c_str(), dir.c_str(), 0) != 0; if (back) restorePrev();
+      g_saveErr = back ? L"The new copy is saved in\n" + outDir + L"\nand the old project is unchanged (error " + std::to_wstring(e) + L")." : L"Saving was interrupted. Your data is safe in two folders:\n" + outDir + L"  (the new copy)\n" + prev + L"  (the previous copy)\nDo not delete them; tell the support channel.";
+      logf("could not move the new project folder in (error %lu); old folder %s", e, back ? "restored" : "NOT restored"); return false; }
+    if (hadPrev) removeDir(older); }
   writeFileAtomic(dir + L"\\artecrec-project.txt", "Saved by ArtecRec. This folder holds one project; ArtecRec may replace it when the project is saved again.\r\n");
-  saveGroups(sproj); writeStudioNames(sproj); g_dirty = false; g_projPath = sproj; g_projForeign = false; g_replaceOk.clear(); return true;
+  saveGroups(sproj); if (!writeStudioNames(sproj)) notice(L"Saved. The scan names could not all be written for Artec Studio; Studio will show its own names (the scans are fine)."); g_dirty = false; g_projPath = sproj; g_projForeign = false; g_replaceOk.clear(); return true;
 }
 static void clearProject() { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); g_projForeign = false; }
 // Review F5/A2/D4: the current project is cleared only after the new one loaded with at least one scan; a Studio project
