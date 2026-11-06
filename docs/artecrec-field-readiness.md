@@ -73,6 +73,13 @@ tracking loss and Stop are discarded (16:06/16:37 13- and 16-frame scans). artec
 9DEA2E7F95119D274C01C8A4FBF9F56B, artecrec-fs.exe F309515DB13B129A88E514B5D863542F. Previous build kept as
 D:\ArtecDiag\artecrec-prev-73049b5.exe. Tests 102/0/0.
 
+## Installed 7 Nov ~05:25 (owner approved in advance; ArtecRec was closed)
+
+Commit `51bcf56`: UI scale 1.25 (21 px body text, 42 px buttons, darker banners for contrast; owner: "the font
+sizes are too small"), plus the replay source and benchmark (no effect in normal use). artecrec.exe MD5
+1090C9C35081A92FCBBB160BC7F2B5C6, artecrec-fs.exe 7ED43F6E5F37AC7CE49836F665835D06. Previous build kept as
+D:\ArtecDiag\artecrec-prev-5cecaf3.exe. Tests 103/0/0.
+
 ## Still needing a field check (verified by code reading only)
 
 | Item | How the acceptance session or the trip shows it |
