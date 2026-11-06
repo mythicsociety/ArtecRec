@@ -430,6 +430,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   createModel(&g_master); g_obs = new Obs();
   // No scanner at start (3 Nov 17:10: cameras wedged after a USB drop, createScanner 0xC0050000): open the window
   // anyway and keep trying to connect; the status bar says what to do. No modal box, no exit.
+  if (cmd && wcsstr(cmd, L"--replay")) replay::on = true;   /* decided before the scanner is looked for */
   bool scannerOk = replay::on ? false : connectScanner(); if (!scannerOk && !replay::on) logf("no scanner at start: will keep trying");
   WNDCLASSW wc = {}; wc.lpfnWndProc = wndProc; wc.hInstance = hi; wc.lpszClassName = L"ArtecRecMain"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); RegisterClassW(&wc);
   WNDCLASSW gc = {}; gc.lpfnWndProc = view::proc; gc.hInstance = hi; gc.lpszClassName = L"ArtecRecGL"; gc.style = CS_OWNDC | CS_DBLCLKS; gc.hCursor = LoadCursor(nullptr, IDC_ARROW); RegisterClassW(&gc);
