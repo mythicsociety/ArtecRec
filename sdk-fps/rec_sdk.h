@@ -1023,13 +1023,13 @@ static ErrorCode runJobPumped(IJob* job, AlgorithmWorkset* ws, const wchar_t* wh
   g_busyText = what; g_busyPct = -1; Prog* prog = new Prog(); auto st = std::make_shared<PumpState>(); st->ws = *ws; st->ws.progress = prog;
   job->addRef(); if (st->ws.in) st->ws.in->addRef(); if (st->ws.out) st->ws.out->addRef(); prog->addRef();
   std::thread t([st, job, prog] { st->ec = executeJob(job, &st->ws); if (st->ws.in) st->ws.in->release(); if (st->ws.out) st->ws.out->release(); job->release(); prog->release(); st->done = true; });
-  auto t0 = clk::now(); bool abandoned = false;
-  while (!st->done.load()) { MSG m; while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { if (m.message == WM_QUIT) { PostQuitMessage((int)m.wParam); break; } TranslateMessage(&m); DispatchMessageW(&m); } Sleep(20);
+  auto t0 = clk::now(); bool abandoned = false; bool sawQuit = false; int quitCode = 0;   // Gemini 1: remember a quit, re-post it once after the job (no re-peek every 20 ms)
+  while (!st->done.load()) { MSG m; while (!sawQuit && PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { if (m.message == WM_QUIT) { sawQuit = true; quitCode = (int)m.wParam; break; } TranslateMessage(&m); DispatchMessageW(&m); } Sleep(20);
     if (std::chrono::duration<double>(clk::now() - t0).count() > askAfterSecs) {
       wchar_t q[400]; swprintf(q, 400, L"%s has been running for %d minutes without finishing.\n\nKeep waiting?\n\nYes = wait %d more minutes.\nNo = give up. Your scans stay in ArtecRec; save them again, if possible to another folder or drive.", what, (int)(std::chrono::duration<double>(clk::now() - t0).count() / 60), askAfterSecs / 60);
       if (MessageBoxW(g_hwnd, q, L"ArtecRec", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1) == IDYES) t0 = clk::now(); else if (!st->done.load()) { abandoned = true; break; } } }
   if (abandoned) { logf("%ls: no result after the time limit; given up by the user (job left to finish on its own)", what); t.detach(); } else t.join();
-  ws->progress = nullptr; prog->release(); g_busyText.clear(); g_busyPct = -1; return abandoned ? ErrorCode_OperationAborted : st->ec;
+  ws->progress = nullptr; prog->release(); g_busyText.clear(); g_busyPct = -1; if (sawQuit) PostQuitMessage(quitCode); return abandoned ? ErrorCode_OperationAborted : st->ec;
 }
 static bool removeDir(const std::wstring& dir) { std::wstring dz = dir; dz.push_back(L'\0'); SHFILEOPSTRUCTW op = {}; op.wFunc = FO_DELETE; op.pFrom = dz.c_str(); op.fFlags = FOF_NO_UI; return SHFileOperationW(&op) == 0; }
 static bool dirExists(const std::wstring& d) { DWORD a = GetFileAttributesW(d.c_str()); return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY); }
@@ -1052,7 +1052,8 @@ static bool saveProject(const std::wstring& sproj) {
   bool marker = GetFileAttributesW((dir + L"\\artecrec-project.txt").c_str()) != INVALID_FILE_ATTRIBUTES, sidecar = GetFileAttributesW((dir + L"\\artecrec-groups.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
   bool ours = (logic::iEquals(sproj, g_projPath) && (marker || sidecar)) || (marker && logic::iEquals(sproj, g_replaceOk));   // another ArtecRec project of the same name is replaced only after the user said yes
   logic::SwapVerdict v = logic::canReplaceFolder(exists, entries, stem, ours, foreignNow, listed);
-  if (v == logic::Swap_Foreign || v == logic::Swap_NotOurs) { g_saveErr = foreignNow ? L"The project in\n" + dir + L"\nnow holds models made in Artec Studio. ArtecRec will not replace it.\n\nUse Save project as... with a new name." : L"The folder\n" + dir + L"\nalready holds other files (or a project ArtecRec did not make). ArtecRec will not replace it.\n\nUse Save project as... with a new name."; logf("save refused: %ls is not this project's own folder", dir.c_str()); return false; }
+  bool studioDirs = false; for (auto& e : entries) if (e.dir && (logic::iEquals(e.name, L"Models") || logic::iEquals(e.name, L"Data") || logic::iEquals(e.name, L"Thumbnails"))) studioDirs = true;   // Gemini 5
+  if (v == logic::Swap_Foreign || v == logic::Swap_NotOurs) { g_saveErr = (foreignNow || studioDirs) ? L"The project in\n" + dir + L"\nnow holds models made in Artec Studio. ArtecRec will not replace it.\n\nUse Save project as... with a new name." : L"The folder\n" + dir + L"\nalready holds other files (or a project ArtecRec did not make). ArtecRec will not replace it.\n\nUse Save project as... with a new name."; logf("save refused: %ls is not this project's own folder", dir.c_str()); return false; }
   bool swap = exists; /* the SDK saver cannot write into an existing folder, even an empty one */ std::wstring outDir = swap ? dir + L"__saving" : dir, outProj = outDir + L"\\" + name;
   if (swap && dirExists(outDir)) removeDir(outDir);   // our own leftover from an interrupted save
   bool created = !dirExists(outDir);   // a first save that fails removes the folder it made (second review: a partial folder blocked later saves)

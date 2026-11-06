@@ -67,7 +67,7 @@ static void init(HWND h) {
 static void text(float x, float y, const wchar_t* s) { glRasterPos2f(x, y); glListBase(fontBase); glCallLists((GLsizei)wcslen(s), GL_UNSIGNED_SHORT, s); }
 static void textMid(float x, float y, const wchar_t* s) { glRasterPos2f(x, y); glListBase(fontMid); glCallLists((GLsizei)wcslen(s), GL_UNSIGNED_SHORT, s); }
 static void textBig(float x, float y, const wchar_t* s) { glRasterPos2f(x, y); glListBase(fontBig); glCallLists((GLsizei)wcslen(s), GL_UNSIGNED_SHORT, s); }
-static bool scanShown(const ScanRec& s) { return s.visible && (s.group < 0 || g_groups[s.group].visible); }
+static bool scanShown(const ScanRec& s) { return s.visible && (s.group < 0 || s.group >= (int)g_groups.size() || g_groups[s.group].visible); }   // Gemini 2: range-checked (a stale group index shows the scan instead of reading past the end)
 
 static bool bounds(float lo[3], float hi[3]) {
   bool any = false; lo[0] = lo[1] = lo[2] = 1e9f; hi[0] = hi[1] = hi[2] = -1e9f;
