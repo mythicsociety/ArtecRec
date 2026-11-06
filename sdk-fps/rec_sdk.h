@@ -369,7 +369,7 @@ static void joinSearchBounded() { g_searchStop = true; for (int i = 0; i < 200 &
   if (g_searchThread.joinable()) { if (g_searchBusy.load()) { logf("the position search did not stop in 10 s: left to finish on its own (its result is ignored)"); ++g_searchGen; g_searchZombie = true; g_searchThread.detach(); notice(L"The position search is taking too long to stop. Live joining is paused until ArtecRec is restarted; recording, auto-align after Stop and saving still work."); } else g_searchThread.join(); } g_searchBusy = false; }   // DeepSeek 3-4
 // Review C6: one live-search result per recorded segment (Pause/Resume makes one scan per segment).
 static std::vector<logic::SegmentPose> g_segPoses;
-static void pushSegmentPose() { logic::SegmentPose p; p.found = g_alignLive.load() && g_liveFound.load(); { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(p.T, g_liveT, sizeof p.T); } g_segPoses.push_back(p); }
+static void pushSegmentPose() { logic::SegmentPose p; p.keyFrames = (int)g_keyFrames.load(); p.maxErr = g_maxErr.load(); p.found = g_alignLive.load() && g_liveFound.load(); /* DeepSeek 6-3: per-segment stats (prepareRecording resets the counters at Resume) */ { std::lock_guard<std::mutex> l(g_liveTmx); memcpy(p.T, g_liveT, sizeof p.T); } g_segPoses.push_back(p); }
 // Review B3: a scanning job whose Stop and cancel both failed is abandoned: its thread is detached, its late WM_JOBDONE
 // (if it ever comes) is ignored by generation, and the app goes to Idle with g_stuck set so the scans can be saved.
 static std::atomic<int> g_jobGen{0};
@@ -686,12 +686,13 @@ static void buildScanDisplay(ScanRec& r, int maxFrames = 120) {   // 240 (08:00 
   std::sort(pick.begin(), pick.end());
   if (!g_camOk && !texd.empty()) fitCamera(r.scan->getElement(texd[0]));
   double ta[3] = {0, 0, 0}; int tn = 0; std::vector<std::pair<int, std::shared_ptr<GlTex>>> photos;   // (frame index, photo) of the textured frames drawn
+  std::vector<int> dispPick;   // DeepSeek 6-2: the frame index of each r.disp entry (no vertex-count matching)
   for (int k : pick) { IFrameMesh* f = r.scan->getElement(k); if (!f) continue; double M[4][4]; mul44(ST, r.scan->getTransformation(k).m, M); FrameMesh m; buildFrameMesh(f, M, m, false, 1); if (m.v.empty()) continue;
     if (f->isTextured()) { grabTexture(f, m); if (!m.uv.empty()) { for (int a = 0; a < 3; a++) ta[a] += m.texAvg[a]; tn++; auto gt = std::make_shared<GlTex>(); gt->data = std::move(m.tex); gt->w = m.texW; gt->h = m.texH; m.tex.clear(); m.texp = gt; photos.push_back({k, gt}); } }
-    r.disp.push_back(std::move(m)); }
+    r.disp.push_back(std::move(m)); dispPick.push_back(k); }
   // frames without a photo: project the nearest photo (by frame index) onto them, as Studio does
   if (g_camOk && !photos.empty()) {   // r.disp is in `pick` order (frames that produced an empty mesh were skipped)
-    std::vector<FrameMesh> extra; size_t di = 0; for (int k : pick) { IFrameMesh* f = r.scan->getElement(k); if (!f) continue; if (di >= r.disp.size()) break; FrameMesh& m = r.disp[di]; if (m.v.size() / 3 != (size_t)f->getPoints()->getSize()) continue; di++; if (f->isTextured()) continue;
+    std::vector<FrameMesh> extra; for (size_t di = 0; di < dispPick.size(); di++) { int k = dispPick[di]; IFrameMesh* f = r.scan->getElement(k); if (!f || !f->getPoints()) continue; FrameMesh& m = r.disp[di]; if (f->isTextured()) continue;   // DeepSeek 6-1/6-2
       // candidate photos: the 6 nearest by frame index; take the one that covers most of this frame (the scanner moves
       // between photos, so the nearest photo may miss part of the frame — that showed as dark bands, 4 Nov 12:05)
       std::vector<int> cand; for (size_t i = 0; i < photos.size(); i++) cand.push_back((int)i); std::sort(cand.begin(), cand.end(), [&](int a, int b) { return abs(photos[a].first - k) < abs(photos[b].first - k); }); if (cand.size() > 6) cand.resize(6);
@@ -909,7 +910,7 @@ static int onJobDone() {
         // the found pose places them too — keep them (they were discarded before, losing a few seconds per join).
         logf("scan placed with the position found live; %d search frames kept", (int)g_foundAt.load()); }
       if (g_alignLive.load() && !found) logf("position was not found during this scan; it keeps its own coordinates");
-      ScanRec r; r.scan = s; r.placed = found; setScanName(r, nextScanName()); r.keyFrames = (int)g_keyFrames.load(); r.maxErr = g_maxErr.load(); countScanStats(r);
+      ScanRec r; r.scan = s; r.placed = found; setScanName(r, nextScanName()); r.keyFrames = perSegment ? poses[i].keyFrames : (int)g_keyFrames.load(); r.maxErr = perSegment ? (float)poses[i].maxErr : g_maxErr.load(); countScanStats(r);
       // Studio groups a scan that was placed by the live search with the scan it was placed against (the most recent
       // visible one). The old "group with the scan that ended at the loss" rule left 1-scan groups when the resumed
       // scan was a discarded stub (3 Nov 16:52 screenshot).

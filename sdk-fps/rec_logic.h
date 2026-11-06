@@ -204,6 +204,6 @@ template <class Id> inline std::vector<int> restoreOrder(const std::vector<Id>& 
 
 // ---------------------------------------------------------------- pause/resume segments (C6)
 // One entry per recorded segment, in the order the SDK returns the scans.
-struct SegmentPose { bool found; double T[4][4]; };
+struct SegmentPose { bool found; double T[4][4]; int keyFrames = 0; double maxErr = 0; };   // + per-segment stats for the Workspace columns
 
 }  // namespace logic
