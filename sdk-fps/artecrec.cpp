@@ -70,8 +70,8 @@ static std::wstring askPath(bool save) {
 // stopping/aligning, waits and runs by itself afterwards; a failure says what happened and where the data is.
 static bool doSaveNow(const std::wstring& target) {
   WritePrivateProfileStringW(L"scan", L"lastProject", target.c_str(), panel::iniPath().c_str()); WritePrivateProfileStringW(nullptr, nullptr, nullptr, panel::iniPath().c_str());   // DeepSeek 4: known before the folder moves start
-  g_mode = M_Busy; SetCursor(LoadCursor(nullptr, IDC_WAIT)); bool ok = saveProject(target); g_mode = M_Idle; SetCursor(LoadCursor(nullptr, IDC_ARROW));
-  if (ok) { g_notice.clear(); notice(L"Saved: " + target); } else { std::wstring m = L"The project was NOT saved.\n\n" + (g_saveErr.empty() ? std::wstring(L"See artecrec.log.") : g_saveErr); MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONERROR); }
+  g_notice.clear(); g_mode = M_Busy; SetCursor(LoadCursor(nullptr, IDC_WAIT)); bool ok = saveProject(target); g_mode = M_Idle; SetCursor(LoadCursor(nullptr, IDC_ARROW));
+  if (ok) { if (g_notice.get().empty()) notice(L"Saved: " + target); }   // a warning raised by the save stays visible else { std::wstring m = L"The project was NOT saved.\n\n" + (g_saveErr.empty() ? std::wstring(L"See artecrec.log.") : g_saveErr); MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONERROR); }
   ws::showProps(); return ok;
 }
 static bool doSave(bool as, bool closing = false) {

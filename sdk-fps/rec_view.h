@@ -253,7 +253,7 @@ static void render(int w, int h, bool forShot) {
 // Redraw only when something changed (new frame, input, project change) or every 400 ms. Drawing a large scan on every
 // 40 ms timer tick starved the message loop on 2 Nov (window frozen for minutes, Stop clicks lost).
 static bool wantRedraw = true; static clk::time_point lastDraw;
-static void draw() { RECT r; GetClientRect(hwnd, &r); if (r.right < 2 || r.bottom < 2) return;
+static void draw() { deleteTrashTextures();   /* DeepSeek 2-1: also while minimised (render does not run then) */ RECT r; GetClientRect(hwnd, &r); if (r.right < 2 || r.bottom < 2) return;
   bool due = std::chrono::duration<double>(clk::now() - lastDraw).count() >= 0.4;
   if (!wantRedraw && !g_newData && !due) return; wantRedraw = false; g_newData = false; lastDraw = clk::now();
   render(r.right, r.bottom, false); SwapBuffers(dc); }

@@ -175,6 +175,7 @@ static bool g_projForeign = false;   // the open project holds Studio entries Ar
 static bool g_stuck = false;         // the scanner job was abandoned after a failed Stop/cancel (review B3): save, then restart
 static std::wstring g_saveErr;       // why the last save failed, in plain words (review F6)
 static std::wstring g_replaceOk;     // a target the user confirmed may replace an existing ArtecRec project (cloud review)
+static std::vector<std::wstring> g_zombieSaveDirs;   // __saving folders of saves given up on this session (still being written) - DeepSeek 2-2
 static std::atomic<bool> g_lostNow{false}; static std::atomic<int> g_countdown{0};
 static HWND g_hwnd;
 #define WM_JOBDONE   (WM_APP + 1)
@@ -715,7 +716,7 @@ static std::wstring nextScanName() {
   for (;;) { wchar_t b[128]; swprintf(b, 128, L"%s %d", base.c_str(), n); bool used = false; for (auto& nm : names) if (nm == b) used = true; if (!used) return b; n++; }
 }
 static std::wstring uniqueName(const std::wstring& base) { std::vector<std::wstring> names; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) names.push_back(s.name); } std::wstring n = base; int k = 2; for (;;) { bool used = false; for (auto& nm : names) if (nm == n) used = true; if (!used) return n; wchar_t b[160]; swprintf(b, 160, L"%s (%d)", base.c_str(), k++); n = b; } }
-static bool waitPostProcess(double maxSecs); static void startPostProcess(IScan* s, bool optimise); static bool postIdle();
+static void startPostProcess(IScan* s, bool optimise); static bool postIdle();
 static void duplicateScan(int i) {   // Studio: Duplicate → "Copy of <name>"
   if (i < 0 || i >= (int)g_scans.size() || !g_scans[i].scan) return; /* the Workspace allows this only when idle (editOk) */ IScan* c = nullptr; createSimilarScan(&c, g_scans[i].scan); if (!c) return; cloneScan(c, g_scans[i].scan);
   ScanRec r; r.scan = c; r.group = g_scans[i].group; r.keyFrames = g_scans[i].keyFrames; r.maxErr = g_scans[i].maxErr; memcpy(r.color, g_scans[i].color, sizeof r.color); setScanName(r, uniqueName(L"Copy of " + g_scans[i].name)); countScanStats(r); buildScanDisplay(r);
@@ -885,7 +886,6 @@ static bool abandonStuckPost() { bool any = false; for (int lp = g_lostPosts.exc
     if (drop) it = g_items.erase(it); else ++it; }
   if (any) { logf("a scan's processing did not finish in 6 min: given up, the scan is kept as recorded"); g_optimising = g_postBusy.load() > 0; } return any; }
 static bool postIdle() { return g_postBusy.load() == 0; }
-static bool waitPostProcess(double maxSecs) { auto t0 = clk::now(); while (g_postBusy.load() > 0) { if (std::chrono::duration<double>(clk::now() - t0).count() > maxSecs) return false; MSG m; while (PeekMessageW(&m, nullptr, WM_POSTDONE, WM_POSTDONE, PM_REMOVE)) DispatchMessageW(&m); Sleep(30); } return true; }   // used only where the UI already guarantees idle
 static void rebuildMaster();
 static void onPostDone(PostResult* pr) {   // UI thread
   { std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) if (rec.scan == pr->src) { if (pr->res != pr->src) { rec.scan->release(); rec.scan = pr->res; pr->res = nullptr; } rec.disp = std::move(pr->disp); memcpy(rec.texAvg, pr->texAvg, sizeof rec.texAvg); rec.hasTexAvg = pr->hasTexAvg; if (rec.ref) rec.ref->release(); rec.ref = pr->ref; pr->ref = nullptr; rec.feats = std::move(pr->feats); countScanStats(rec); break; } }
@@ -1020,11 +1020,11 @@ struct Prog : public ProgressInfoBase { void report(int current, int total) over
 // Round 2 (R2-01): a save or open whose SDK job does not return is no longer a dead end. After `askAfterSecs` the user is
 // asked whether to keep waiting; giving up detaches the job (it holds its own references to the job and models, and
 // writes only into its own folder) and returns ErrorCode_OperationAborted. The scans stay in memory.
-struct PumpState { std::atomic<bool> done{false}; ErrorCode ec = ErrorCode_OK; AlgorithmWorkset ws; };
-static ErrorCode runJobPumped(IJob* job, AlgorithmWorkset* ws, const wchar_t* what, int askAfterSecs = 900) {
-  g_busyText = what; g_busyPct = -1; Prog* prog = new Prog(); auto st = std::make_shared<PumpState>(); st->ws = *ws; st->ws.progress = prog;
+struct PumpState { std::atomic<bool> done{false}; ErrorCode ec = ErrorCode_OK; AlgorithmWorkset ws; std::vector<IScan*> keep; };   // keep: scans the job reads, released when it ends (DeepSeek 2-4)
+static ErrorCode runJobPumped(IJob* job, AlgorithmWorkset* ws, const wchar_t* what, int askAfterSecs = 900, std::vector<IScan*>* keepAlive = nullptr) {
+  g_busyText = what; g_busyPct = -1; Prog* prog = new Prog(); auto st = std::make_shared<PumpState>(); st->ws = *ws; st->ws.progress = prog; if (keepAlive) { st->keep = std::move(*keepAlive); keepAlive->clear(); }
   job->addRef(); if (st->ws.in) st->ws.in->addRef(); if (st->ws.out) st->ws.out->addRef(); prog->addRef();
-  std::thread t([st, job, prog] { st->ec = executeJob(job, &st->ws); if (st->ws.in) st->ws.in->release(); if (st->ws.out) st->ws.out->release(); job->release(); prog->release(); st->done = true; });
+  std::thread t([st, job, prog] { st->ec = executeJob(job, &st->ws); if (st->ws.in) st->ws.in->release(); if (st->ws.out) st->ws.out->release(); for (IScan* k : st->keep) k->release(); st->keep.clear(); job->release(); prog->release(); st->done = true; });
   auto t0 = clk::now(); bool abandoned = false; bool sawQuit = false; int quitCode = 0;   // Gemini 1: remember a quit, re-post it once after the job (no re-peek every 20 ms)
   while (!st->done.load()) { MSG m; while (!sawQuit && PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { if (m.message == WM_QUIT) { sawQuit = true; quitCode = (int)m.wParam; break; } TranslateMessage(&m); DispatchMessageW(&m); } Sleep(20);
     if (std::chrono::duration<double>(clk::now() - t0).count() > askAfterSecs) {
@@ -1057,17 +1057,18 @@ static bool saveProject(const std::wstring& sproj) {
   bool studioDirs = false; for (auto& e : entries) if (e.dir && (logic::iEquals(e.name, L"Models") || logic::iEquals(e.name, L"Data") || logic::iEquals(e.name, L"Thumbnails"))) studioDirs = true;   // Gemini 5
   if (v == logic::Swap_Foreign || v == logic::Swap_NotOurs) { g_saveErr = (foreignNow || studioDirs) ? L"The project in\n" + dir + L"\nnow holds models made in Artec Studio. ArtecRec will not replace it.\n\nUse Save project as... with a new name." : L"The folder\n" + dir + L"\nalready holds other files (or a project ArtecRec did not make). ArtecRec will not replace it.\n\nUse Save project as... with a new name."; logf("save refused: %ls is not this project's own folder", dir.c_str()); return false; }
   bool swap = exists; /* the SDK saver cannot write into an existing folder, even an empty one */ std::wstring outDir = swap ? dir + L"__saving" : dir, outProj = outDir + L"\\" + name;
+  for (auto& z : g_zombieSaveDirs) if (logic::iEquals(z, outDir)) { g_saveErr = L"An earlier save of this project was given up and may still be writing to\n" + outDir + L"\n\nSave under a new name, or close and reopen ArtecRec first."; logf("save refused: an abandoned save may still be writing %s", logic::utf8(outDir).c_str()); return false; }   // DeepSeek 2-2
   if (swap && dirExists(outDir)) removeDir(outDir);   // our own leftover from an interrupted save
   bool created = !dirExists(outDir);   // a first save that fails removes the folder it made (second review: a partial folder blocked later saves)
   if (created && SHCreateDirectoryExW(nullptr, outDir.c_str(), nullptr) != ERROR_SUCCESS && !dirExists(outDir)) { g_saveErr = L"Could not create the folder\n" + outDir + L"\n(is the drive full or read-only?)"; return false; }
   prj::ProjectSettings ps; ps.path = outProj.c_str(); prj::IProject* p = nullptr; ErrorCode ec = prj::createNewProject(&p, &ps); if (ec != ErrorCode_OK || !p) { logf("createNewProject 0x%08X", (unsigned)ec); g_saveErr = L"The scanner software could not create the project file."; if (swap || created) removeDir(outDir); return false; }
   prj::ProjectSaverSettings ss; ss.path = outProj.c_str(); generateUuid(&ss.projectId); ss.compressionLevel = 0; IJob* saver = nullptr; ec = p->createSaver(&saver, &ss);
   if (ec != ErrorCode_OK || !saver) { logf("createSaver 0x%08X", (unsigned)ec); p->release(); g_saveErr = L"The scanner software could not start saving."; if (swap || created) removeDir(outDir); return false; }
-  IModel* snap = nullptr; createModel(&snap); { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.scan) snap->add(r.scan); }   // snapshot: the saver never sees g_master change (review A3)
+  IModel* snap = nullptr; createModel(&snap); std::vector<IScan*> keep; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) if (r.scan) { r.scan->addRef(); keep.push_back(r.scan); snap->add(r.scan); } }   // DeepSeek 2-4: the save holds every scan it writes   // snapshot: the saver never sees g_master change (review A3)
   AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = snap; ws.threadsCount = std::thread::hardware_concurrency();
-  auto t0 = clk::now(); ec = runJobPumped(saver, &ws, L"Saving project..."); saver->release(); p->release(); snap->release();
+  auto t0 = clk::now(); ec = runJobPumped(saver, &ws, L"Saving project...", 900, &keep); saver->release(); p->release(); snap->release();
   logf("save 0x%08X %.1f s -> %s%s", (unsigned)ec, std::chrono::duration<double>(clk::now() - t0).count(), logic::utf8(sproj).c_str(), swap ? " (replacing the existing copy; the old one is kept as __previous)" : "");
-  if (ec == ErrorCode_OperationAborted) { g_saveErr = L"Saving was given up. The unfinished copy is in\n" + outDir + L"\n(do not use it). " + (swap ? L"The previous copy of the project is unchanged. " : L"") + L"Save again, if possible to another folder or drive."; return false; }   // R2-01
+  if (ec == ErrorCode_OperationAborted) { g_zombieSaveDirs.push_back(outDir); g_saveErr = L"Saving was given up. The unfinished copy is in\n" + outDir + L"\n(do not use it). " + (swap ? L"The previous copy of the project is unchanged. " : L"") + L"Save again, if possible to another folder or drive."; return false; }   // R2-01
   if (ec != ErrorCode_OK) { if (swap || created) removeDir(outDir); g_saveErr = L"The scanner software reported an error while saving (code " + std::to_wstring((unsigned)ec) + L")." + (swap ? L" The previous copy of the project is unchanged." : L" Nothing was kept; save again, if possible to another drive."); return false; }
   // second outside review (F01): the older backup is set aside, not deleted, until the new project is in place
   if (swap) { std::wstring prev = dir + L"__previous", older = dir + L"__previous_old"; bool hadPrev = dirExists(prev);
@@ -1078,7 +1079,8 @@ static bool saveProject(const std::wstring& sproj) {
       g_saveErr = back ? L"The new copy is saved in\n" + outDir + L"\nand the old project is unchanged (error " + std::to_wstring(e) + L")." : L"Saving was interrupted. Your data is safe in two folders:\n" + outDir + L"  (the new copy)\n" + prev + L"  (the previous copy)\nDo not delete them; tell the support channel.";
       logf("could not move the new project folder in (error %lu); old folder %s", e, back ? "restored" : "NOT restored"); return false; }
     if (hadPrev) removeDir(older); }
-  writeFileAtomic(dir + L"\\artecrec-project.txt", "Saved by ArtecRec. This folder holds one project; ArtecRec may replace it when the project is saved again.\r\n");
+  bool markerOk = writeFileAtomic(dir + L"\\artecrec-project.txt", "Saved by ArtecRec. This folder holds one project; ArtecRec may replace it when the project is saved again.\r\n");   // DeepSeek 2-3
+  if (!markerOk) { logf("project marker file could not be written"); notice(L"Saved. A small ArtecRec marker file could not be written; the next save of this project may ask for a new name (the scans are fine)."); }
   if (!saveGroups(sproj)) notice(L"Saved. The ArtecRec names and groups could not be written (the scans are fine; names and groups will be lost on reopening)."); else if (!writeStudioNames(sproj)) notice(L"Saved. The scan names could not all be written for Artec Studio; Studio will show its own names (the scans are fine)."); g_dirty = false; g_projPath = sproj; g_projForeign = false; g_replaceOk.clear(); return true;
 }
 static void clearProject() { std::lock_guard<std::mutex> l(g_scanMx); for (auto& r : g_scans) { if (r.scan) r.scan->release(); if (r.ref) r.ref->release(); } g_scans.clear(); g_groups.clear(); g_master->clear(); g_projPath.clear(); g_dirty = false; g_alignMsg.clear(); g_projForeign = false; }
