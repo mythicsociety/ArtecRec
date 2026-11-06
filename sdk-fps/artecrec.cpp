@@ -51,7 +51,7 @@ static void doRecord() {
 static void doPreview() { panel::readSettings(); int m = g_mode.load(); if (g_stuck) { notice(L"The scanner stopped answering. Save the project, then close and reopen ArtecRec."); return; }
   if (m == M_Idle) { if (startProcedure(ScanningState_Preview)) { g_mode = M_Preview; view::follow = true; g_notice.clear(); } else { notice(L"Could not start the scanner. ArtecRec is looking for it again."); startReconnect(); } } else if (m == M_Paused) g_mode = M_Preview; }   // review B7
 // review B5: a Stop pressed while an automatic restart is stopping cancels that restart
-static void doStop() { g_countdown = 0; int m = g_mode.load(); if (m == M_Record) g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); if (m == M_Record || m == M_Preview || m == M_Paused) { g_userStop = true; stopProcedure(); } else if (m == M_Stopping) g_userStop = true; }
+static void doStop() { g_countdown = 0; int m = g_mode.load(); if (m == M_Record) g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); if (m == M_Record || m == M_Preview || m == M_Paused) { g_userStop = true; stopProcedure(); } else if (m == M_Stopping) { g_userStop = true; if (g_autoRestart) notice(L"Stopped. The automatic restart after tracking loss was cancelled; the passes recorded so far are kept."); } }   /* third review: say so */
 // Scanner body buttons (manual, "Hardware Buttons"): Record button → Preview, then Record, then toggles Preview/Record; Stop → Stop.
 static void scannerButton(int b) {
   int m = g_mode.load();
