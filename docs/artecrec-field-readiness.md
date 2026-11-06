@@ -51,7 +51,7 @@ owner-approved. Field check: after the next crash or kill, the recovery question
 Field finding 6 Nov: global registration hit its 120 s limit on 6 long passes (250-480 frames); measure the
 real time on the laptop and set the limit from it.
 
-## No time limits on processing (6 Nov, commit 73049b5, not yet installed)
+## No time limits on processing (6 Nov, commit 73049b5, installed ~14:45: artecrec.exe MD5 776F47494C89D6C14CB6A20695C2FE56, artecrec-fs.exe 602117478E6905D2512400F8FD7D6FDF; previous build kept as D:\ArtecDiag\artecrec-prev-122c782.exe)
 
 Owner: "why should there be a limit at all?" Processing runs until it ends; Edit > Cancel processing stops it; a step
 that reports progress and stops reporting for 5 min is treated as hung. Save no longer waits for processing. Global
