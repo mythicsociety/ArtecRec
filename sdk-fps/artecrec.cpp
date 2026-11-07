@@ -392,13 +392,20 @@ static void onTimer() {
   // at that instant (floor, background) and then every frame fails, even back over the stone — 200 of 201 frames. The
   // rule below only restarts scans with > 10 good frames, so it stayed stuck. If a fresh recording has tracked nothing
   // for 3 s, start it again: the new start locks onto what the scanner sees by then.
-  { static clk::time_point lostAt; static bool wasLostR = false; bool lostR = m == M_Record && g_lostNow.load();
-    if (lostR && !wasLostR) lostAt = clk::now(); wasLostR = lostR;
-    if (lostR && !g_autoRestart && g_storedFrames.load() <= 10 && std::chrono::duration<double>(clk::now() - lostAt).count() > 3.0) { wasLostR = false;
+  // 7 Nov (museum day, owner: "these people are used to Studio"; 13 scans in 20 min on a small stone): a loss no longer
+  // ends the scan after 2 frames. The SDK stores nothing while tracking is lost (ignoreRegistrationErrors = false) and
+  // registers again when the scanner is back over the last scanned surface, so the pass continues in the same scan, as
+  // in Studio. Only Stop ends a pass, or a loss longer than logic::lossEndsScan. The fresh-recording rule above stays.
+  { static clk::time_point lostAt; static bool wasLostR = false; bool lostR = m == M_Record && g_lostNow.load(); bool established = g_storedFrames.load() > 10;
+    if (lostR && !wasLostR) { lostAt = clk::now(); if (established) logf("tracking lost: the scan stays open; waiting for the scanner to find the last scanned surface again"); }
+    double lostSecs = lostR ? std::chrono::duration<double>(clk::now() - lostAt).count() : 0;
+    if (!lostR && wasLostR && established) logf("tracking back after %.1f s: same scan continues", std::chrono::duration<double>(clk::now() - lostAt).count());
+    wasLostR = lostR;
+    if (lostR && !g_autoRestart && !established && lostSecs > 3.0) { wasLostR = false;
       if (logic::mayRestartFresh(g_freshRestarts, g_userStop, g_reconnect)) { g_freshRestarts++; g_autoRestart = true; g_lossRestart = true; g_resumeGroupWith = (int)g_scans.size(); logf("no tracking for 3 s on a fresh recording: restarting it (%d)", g_freshRestarts); }
       else { logf("no tracking after %d fresh restarts: recording stopped", g_freshRestarts); notice(L"The scanner cannot find the surface. Point it at the stone you already scanned, about 25 cm away, and press Record."); g_userStop = true; }   // review B5
-      g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); stopProcedure(); } }
-  static int lostRun = 0; if (m == M_Record) { lostRun = g_lostNow.load() ? lostRun + 1 : 0; if (lostRun >= 2 && !g_autoRestart && g_storedFrames.load() > 10) { lostRun = 0; g_autoRestart = true; g_lossRestart = true; g_resumeGroupWith = (int)g_scans.size(); logf("tracking lost: ending this scan%s", S.scanUsingAutoAlign ? ", searching for position in a new one" : ""); g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); stopProcedure(); } } else lostRun = 0;
+      g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); stopProcedure(); }
+    else if (lostR && !g_autoRestart && established && logic::lossEndsScan(lostSecs)) { wasLostR = false; g_autoRestart = true; g_lossRestart = true; g_resumeGroupWith = (int)g_scans.size(); logf("tracking lost for %.0f s: ending this scan%s", lostSecs, S.scanUsingAutoAlign ? ", searching for position in a new one" : ""); g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); stopProcedure(); } }
   // Capture watchdog (09:05 case: Preview ran 17 s with no frame from the scanner). Restart the capture once or twice,
   // then tell the user to reconnect the scanner.
   // review B10: a capture that delivers frames resets the restart budget

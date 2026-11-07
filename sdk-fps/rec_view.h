@@ -242,8 +242,8 @@ static void render(int w, int h, bool forShot) {
   // track. After 6 s of that, say what to do, in plain words.
   { static clk::time_point lostSince; static bool wasLost = false; if (lost && !wasLost) lostSince = clk::now(); wasLost = lost;
     if (lost && std::chrono::duration<double>(clk::now() - lostSince).count() > 6.0) { glColor4f(0.72f, 0.34f, 0.0f, 0.9f); rect(0, h / 2.f + 34, (float)w, 34); glColor3f(1, 1, 1); text(w / 2.f - 260, h / 2.f + 56, L"No usable surface: hold the scanner about 25 cm from carved stone, over an area already scanned"); } }
-  if (lost) { if (S.scanUsingAutoAlign) { glColor4f(0.05f, 0.42f, 0.14f, 0.88f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
-    else { glColor4f(0.8f, 0.1f, 0.1f, 0.8f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 210, h / 2.f + 6, L"Tracking lost: Repeat scan using slower motions or additional features"); } }
+  // 7 Nov: a loss keeps the scan open (artecrec.cpp, logic::lossEndsScan); plain words on what to do
+  if (lost) { glColor4f(0.72f, 0.34f, 0.0f, 0.9f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 250, h / 2.f + 6, L"Tracking lost: go back to the last place you scanned, about 25 cm away. The scan continues."); }
   else if (mode == M_Record && g_alignLive.load() && !g_liveFound.load()) { glColor4f(0.05f, 0.42f, 0.14f, 0.88f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
   else if (mode == M_Record && g_liveFound.load() && std::chrono::duration<double>(clk::now() - (clk::time_point)g_lastSearch).count() < 3.0) { glColor4f(0.05f, 0.42f, 0.14f, 0.88f); rect(w / 2.f - 120, h - 60.f, 240, 30); glColor3f(1, 1, 1); text(w / 2.f - 55, h - 40.f, L"Position found"); }
   if (g_overheated.load()) { glColor4f(0.72f, 0.34f, 0.0f, 0.9f); rect(0, 44, (float)w, 30); glColor3f(1, 1, 1); text(w / 2.f - 160, 64, L"Scanner overheated — let it cool before continuing"); }

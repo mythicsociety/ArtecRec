@@ -231,6 +231,11 @@ TEST(join_share_and_median_limits, "D1") {
   CHECK(!acceptJoin(0.9f, 2.51f, false, 5).ok); CHECK(acceptJoin(0.9f, 2.5f, false, 5).ok); CHECK(!acceptJoin(0.0f, 9.f, false, 5).ok);
   CHECK(strlen(acceptJoin(0.1f, 0.5f, false, 5).why) > 0); CHECK(strlen(acceptJoin(0.9f, 0.5f, false, 5).why) == 0);
 }
+TEST(loss_keeps_the_scan_open, "field") {
+  // 7 Nov museum day: a tracking loss no longer ends the scan (Studio behaviour); only a very long loss does
+  CHECK(!lossEndsScan(0)); CHECK(!lossEndsScan(0.4)); CHECK(!lossEndsScan(10)); CHECK(!lossEndsScan(60)); CHECK(!lossEndsScan(120));
+  CHECK(lossEndsScan(120.1)); CHECK(lossEndsScan(600));
+}
 TEST(field_mode_records_only, "field") {
   // 7 Nov museum day (owner): no processing after Stop in the field; the passes are placed in the lab
   CHECK(processAfterStop(false)); CHECK(!processAfterStop(true));

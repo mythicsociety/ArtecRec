@@ -167,6 +167,11 @@ inline bool allowed(Action a, int mode, bool busyPost, bool stuck) {
 // Fresh recordings that track nothing are restarted at most this many times in a row; then recording stops and the
 // user is told to point the scanner at the stone.
 inline bool mayRestartFresh(int consecutiveFreshRestarts, bool userStop, bool reconnecting) { return !userStop && !reconnecting && consecutiveFreshRestarts < 5; }
+// 7 Nov (museum day; the team are Studio users and got 13 scans in 20 minutes on a small stone): a tracking loss no
+// longer ends the scan. The SDK stores nothing while tracking is lost and registers again when the scanner is back
+// over the last scanned surface, so the pass simply continues, as in Studio. Only Stop ends a pass - or a loss that
+// goes on for this long (the operator has walked away or the scanner sees nothing usable).
+inline bool lossEndsScan(double lostSecs) { return lostSecs > 120.0; }
 
 // ---------------------------------------------------------------- depth range (F4)
 // Space Spider working range per Artec: about 150-350 mm; Studio's default 170-330 mm.

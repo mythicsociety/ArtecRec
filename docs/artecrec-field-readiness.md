@@ -132,3 +132,13 @@ Trail29 (Madhusudhan, lab, 09:34-): the live search spent its whole time on the 
 each, so the geometry search was cut off at Stop (0x00010105 in 0.0 s) on every short pass; passes were placed only by
 the after-Stop auto-align (31 s). Fix: logic::textureJoinPossible — different sizes -> skip the texture join, geometry
 at once. Unit 64/0; field-day replay 9/9 (same-size frames, texture join unaffected). MD5 4848ca4545ea6b20c058f9e57b7933b0.
+
+### 7 Nov 10:38 — INSTALLED on the laptop: build 10:33 (commit after a1cbe02 + loss handling), MD5 4faf3e69736a2cc7463cbc08ed0d84a7
+Owner ("can you install a new version with all the fixes" / "go"), between stone 2 and stone 3 at the museum. In it:
+texture-size skip (1b15788), Field mode (a1cbe02, switched ON in the laptop's artecrec.ini), and a tracking loss no
+longer ends the scan (logic::lossEndsScan 120 s; the SDK stores nothing while lost and registers again over the last
+scanned surface). Tests: unit 66/0; integration 17/0 (a1cbe02); system 20/1 (the known 2.0 s stall check, 2.0014 s);
+replay field-day 9/9, field-mode-check 7/7, loss-check 4/4 (+1 script mistake fixed). Previous exe kept as
+D:\ArtecRecrtecrec.exe.prev. Madhusudhan had set autoAlign=0 and scanUsingAutoAlign=0 himself; left as they were.
+Stone timings (build 06:55): stone 1 (low-medium) 16 min scanning, 19 min to placed, 7 passes; stone 2 (small-low)
+~21 min, 13 scans, losses every 10-15 s at the stone edge over a blue tarp (photo), after-Stop auto-align 15-184 s.

@@ -1,0 +1,25 @@
+# Replay script: a tracking loss in the middle of a pass must NOT end the scan (7 Nov, museum day: Studio behaviour).
+# Run: artecrec.exe --replay-script C:\Artec\tests\e2e\replay-loss-patient.txt <finished project with 2+ scans>
+# Written for Maranaykanahalli2viragallu (scan 2: 608 frames). One pass with a 40-frame loss (7 s) in the middle,
+# then the frames register again: ONE scan must result, and it must sit where the source scan is.
+hide 1
+hide 2
+hide 3
+log pass 1: scan 2 frames 0-300, with a 40-frame loss after frame 100
+record 2 0 300
+wait fed 100
+lose 40
+wait fed 260
+stop
+settle
+expect added 1
+log pass 2: a second pass over the end of pass 1 (scan 2 frames 220-420), loss of 25 frames after joining
+record 2 220 420
+wait fed 90
+lose 25
+wait fed 190
+stop
+settle
+expect added 2
+expect still 4 0.05
+end
