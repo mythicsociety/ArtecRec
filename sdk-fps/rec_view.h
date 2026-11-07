@@ -256,7 +256,8 @@ static void render(int w, int h, bool forShot) {
   int cd = g_countdown.load(); if (cd > 0) { wchar_t t[32]; swprintf(t, 32, L"Recording in %d…", cd); glColor4f(0, 0, 0, 1); rect(w / 2.f - 100, h / 2.f - 30, 200, 60); glColor3f(1, 1, 1); text(w / 2.f - 60, h / 2.f + 6, t); }
   // 7 Nov (owner: "he is not tech savvy"): every wait says so in plain words, in the middle of the screen, with the way out
   if (mode == M_Aligning) banner((float)w, h / 2.f, L"Please wait: placing the passes. (Edit > Cancel processing to skip)", 0, 0, 0, false);
-  if (mode == M_Busy) banner((float)w, h / 2.f, L"Please wait: working on the scans. Esc stops and keeps them as they are.", 0, 0, 0, false);
+  if (mode == M_Busy) { static wchar_t bt[160]; if (!g_busyText.empty()) { if (g_busyPct.load() >= 0) swprintf(bt, 160, L"Please wait: %s %d%%", g_busyText.c_str(), g_busyPct.load()); else swprintf(bt, 160, L"Please wait: %s", g_busyText.c_str()); } else wcscpy(bt, L"Please wait: working on the scans.");
+    banner((float)w, h / 2.f, bt, 0, 0, 0, false); }   // 7 Nov 11:17: the generic words showed during a Save and suggested Esc; say what is actually running
   overlayEnd();
 }
 // Redraw only when something changed (new frame, input, project change) or every 400 ms. Drawing a large scan on every
