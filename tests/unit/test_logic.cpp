@@ -231,6 +231,12 @@ TEST(join_share_and_median_limits, "D1") {
   CHECK(!acceptJoin(0.9f, 2.51f, false, 5).ok); CHECK(acceptJoin(0.9f, 2.5f, false, 5).ok); CHECK(!acceptJoin(0.0f, 9.f, false, 5).ok);
   CHECK(strlen(acceptJoin(0.1f, 0.5f, false, 5).why) > 0); CHECK(strlen(acceptJoin(0.9f, 0.5f, false, 5).why) == 0);
 }
+TEST(texture_join_skipped_when_photo_sizes_differ, "D1") {
+  // 7 Nov museum day: stored passes 960x1280, live frames 480x640 -> the SDK refuses them; go straight to geometry
+  CHECK(!textureJoinPossible(960, 1280, 480, 640)); CHECK(!textureJoinPossible(480, 640, 960, 1280));
+  CHECK(textureJoinPossible(480, 640, 480, 640)); CHECK(textureJoinPossible(960, 1280, 960, 1280));
+  CHECK(!textureJoinPossible(0, 0, 0, 0)); CHECK(!textureJoinPossible(0, 0, 480, 640));   // untextured frames: no texture join
+}
 TEST(join_geometry_only_refuses_flat_window, "D1") {
   // threshold 0.6 mm (lead, 5 Nov): geometry-only placement needs relief; texture joins are not affected
   CHECK(!acceptJoin(0.95f, 0.3f, true, 0.0f).ok); CHECK(!acceptJoin(0.95f, 0.3f, true, 0.59f).ok);

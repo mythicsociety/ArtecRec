@@ -96,6 +96,9 @@ inline int rewriteScanNames(std::string& xml, const std::vector<std::wstring>& n
 // shape: a pass can slide along a flat surface and still lie on it. flatness = RMS distance (mm) of the window
 // points from their best-fit plane. 0.6 mm is deliberately loose (only near-featureless surfaces are refused) until
 // field data calibrate it: every join now logs its flatness.
+// 7 Nov (museum day): the SDK's textured registration refuses frames whose photos differ in size (stored passes
+// 960x1280, live frames 480x640). A texture join between them can never succeed; the search goes straight to geometry.
+inline bool textureJoinPossible(int refW, int refH, int probeW, int probeH) { return refW > 0 && refH > 0 && refW == probeW && refH == probeH; }
 struct GateResult { bool ok; const char* why; };
 inline GateResult acceptJoin(float share, float medianMm, bool geometryOnly, float flatnessMm) {
   if (!(share == share) || !(medianMm == medianMm) || !(flatnessMm == flatnessMm)) return {false, "the join could not be measured"};   // NaN

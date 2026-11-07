@@ -551,8 +551,14 @@ static bool hybridResume(const HybridWindow& win, double T[4][4], int& nRef, int
   nProbe = (int)probeIn.size(); ensureNormals(R);
   // 7 Nov diagnostic: "can't register surfaces with different texture image scales" (113 of 201 searches on 6 Nov) -
   // log the texture image sizes of the reference and the probe frames, once a minute
-  { static clk::time_point lastTexLog; if (std::chrono::duration<double>(clk::now() - lastTexLog).count() > 60) { lastTexLog = clk::now(); auto dims = [](IFrameMesh* f, int& w, int& h) { w = h = 0; if (f && f->isTextured()) { IImage* im = f->getImage(); if (im) { w = im->getWidth(); h = im->getHeight(); } } };
-      int rw, rh, pw, ph; dims(R->getElement(0), rw, rh); dims(R->getElement(nRef), pw, ph); logf("hybrid resume textures: reference frame %dx%d, probe frame %dx%d%s", rw, rh, pw, ph, (rw != pw || rh != ph) ? " <- DIFFERENT (the SDK refuses to register them)" : ""); } }
+  // 7 Nov 09:40 (museum day, Trail29): the stored passes carry full-size photos (960x1280), the live frames half-size
+  // (480x640); the SDK refuses to register them, so the three texture tries (~6 s each) only used up the pass before
+  // the geometry search got its turn. Different sizes -> skip the texture join at once (logic::textureJoinPossible).
+  { auto dims = [](IFrameMesh* f, int& w, int& h) { w = h = 0; if (f && f->isTextured()) { IImage* im = f->getImage(); if (im) { w = im->getWidth(); h = im->getHeight(); } } };
+    int rw, rh, pw, ph; dims(R->getElement(0), rw, rh); dims(R->getElement(nRef), pw, ph);
+    static clk::time_point lastTexLog; bool say = std::chrono::duration<double>(clk::now() - lastTexLog).count() > 60; if (say) lastTexLog = clk::now();
+    if (!logic::textureJoinPossible(rw, rh, pw, ph)) { if (say) logf("texture join skipped: reference photos %dx%d, live photos %dx%d (the SDK cannot register different sizes); using the geometry search", rw, rh, pw, ph); R->release(); return false; }
+    if (say) logf("hybrid resume textures: reference frame %dx%d, probe frame %dx%d", rw, rh, pw, ph); }
   IModel* in = nullptr; createModel(&in); in->add(R); IModel* out = nullptr; createModel(&out);
   alg::SerialRegistrationSettings sd; sd.scannerType = src->getScannerType(); sd.registrationType = alg::SerialRegistrationType_RoughTextured; alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createSerialRegistrationAlgorithm(&a, &sd);
   auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(a, &ws, 20, "position search", &g_searchStop); a->release(); }
