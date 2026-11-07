@@ -49,6 +49,17 @@ Reading: with little overlap the join or auto-align lands 4-8 mm off while still
 rule stays: resume over surface already scanned, with generous overlap. Live joins from a mid-pass start are rare
 (1 of 7 tried): the first frames of a resume are often over fresh surface.
 
+## Batch 2 (7 Nov 06:45-09:15, 21 finished projects, resume over the best-overlapping part of the pass)
+
+50 passes. 47 placeable (3 overlap nothing as saved). With a sound saved reference (28): 26 placed within 5 mm,
+1 wrong (Kalya Byrava, the slid join below), 1 not placed. Finished-model check over all 47: 39 on the model, 8 off.
+Live joins: 16 of 47, 1-2 tries, 3-21 s. Anchors moved: 0.
+
+Second opinion (SDK auto-align from scratch after a live join), 8 cases: the 1 slid join (Kallesvara temple
+sculptures, 10 mm off) was 10.9 mm from the second opinion, which sat 1.1 mm from the truth; the 7 correct joins were
+0.3-4.3 mm from it. A "disagree by more than 5 mm" rule would have flagged the slide and none of the good joins.
+`tests/replay/summarise.py <csv>` prints these numbers.
+
 ## A slid join, and a second opinion that catches it (7 Nov 08:30)
 
 Kalya Byrava, pass 1 (102 frames, overlap start, reference sound: 95 % on the other passes, 0.01 mm): the live
