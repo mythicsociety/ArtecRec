@@ -1,10 +1,11 @@
 # Replay benchmark of one copied project (mid-pass resume), with the saved-position and finished-model checks.
 # Usage: bench-one.ps1 <project folder under D:\ArtecReplay\finished> [csv name]
-param([string]$Folder, [string]$Csv = 'bench-finished.csv', [int]$MaxMin = 25, [string]$Mode = 'mid')
+param([string]$Folder, [string]$Csv = 'bench-finished.csv', [int]$MaxMin = 25, [string]$Mode = 'mid', [string]$Bin = 'D:\ArtecReplay\bin')
 $modeArg = switch ($Mode) { 'mid' { '--replay-from-mid' } 'overlap' { '--replay-from-overlap' } default { '' } }
 $env:PATH = "C:\Program Files\Artec\Artec 3D Scanning SDK\bin-x64;" + $env:PATH
-$bin = 'D:\ArtecReplay\bin'; $res = 'D:\ArtecReplay\results'; New-Item -ItemType Directory -Force $bin, $res | Out-Null
-Copy-Item C:\Artec\sdk-fps\artecrec.exe $bin -Force; Copy-Item C:\Artec\sdk-fps\artecrec.exe.manifest $bin -Force -ErrorAction SilentlyContinue
+$bin = $Bin; $res = 'D:\ArtecReplay\results'; New-Item -ItemType Directory -Force $bin, $res | Out-Null
+try { Copy-Item C:\Artec\sdk-fps\artecrec.exe $bin -Force -ErrorAction Stop } catch { "WARNING: could not refresh $bin\artecrec.exe (in use?): $($_.Exception.Message)" }
+Copy-Item C:\Artec\sdk-fps\artecrec.exe.manifest $bin -Force -ErrorAction SilentlyContinue
 $pr = Get-ChildItem $Folder -Filter *.sproj -File | Select-Object -First 1; if (-not $pr) { "no .sproj in $Folder"; exit 1 }
 $tag = "fin-$Mode-" + ((Split-Path $Folder -Leaf) -replace '[^\w-]', '_'); $ts = Get-Date
 $p = Start-Process "$bin\artecrec.exe" -ArgumentList "--replay-bench $res\$Csv $modeArg `"$($pr.FullName)`"" -WorkingDirectory $bin -PassThru
