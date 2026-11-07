@@ -18,14 +18,14 @@ stop
 settle
 expect added 2
 expect still 4 0.05
-log pass 3: another part of the stone (scan 1), tracking lost after 100 frames, then the automatic restart
+log pass 3: another part of the stone (scan 1), tracking lost after 100 frames, then the automatic restart (a loss makes two scans)
 record 1 0 214
 wait fed 100
 lose 15
 wait secs 20
 stop
 settle
-expect added 3
+expect added 4
 expect still 4 0.05
 expect still 5 0.05
 log done: the project holds the three new passes; save it from the File menu if you like

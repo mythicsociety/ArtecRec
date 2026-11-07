@@ -166,7 +166,8 @@ static void check(bool ok, const char* what) { checks++; if (!ok) { fails++; log
 static int num(const std::wstring& w) { return _wtoi(w.c_str()); }
 static void step() {
   int m = g_mode.load();
-  if (waiting) { bool done = waitKind == 1 ? replay::fed.load() >= waitFed : waitKind == 2 ? std::chrono::duration<double>(clk::now() - tw).count() >= waitSecs : waitKind == 3 ? (m == M_Idle) : (m == M_Idle && postIdle() && !g_pendingAlign && !g_pendingSave); if (!done) return; waiting = false; }
+  if (waiting) { bool done = waitKind == 1 ? replay::fed.load() >= waitFed : waitKind == 2 ? std::chrono::duration<double>(clk::now() - tw).count() >= waitSecs : waitKind == 3 ? (m == M_Idle) : (m == M_Idle && postIdle() && !g_pendingAlign && !g_pendingSave); if (!done) return; waiting = false;
+    if (waitKind == 4) while (start.size() < g_scans.size()) start.push_back(g_scans[start.size()].scan ? g_scans[start.size()].scan->getScanTransformation() : Matrix4x4D());   /* scans added during the run: "expect still" measures from when they settled */ }
   if (pc >= cmds.size()) { active = false; logf("replay script done: %d check(s), %d failed", checks, fails); g_dirty = false; autosaveCovered(false); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); return; }
   auto& c = cmds[pc++]; const std::wstring& op = c[0]; char b[300];
   auto scanAt = [&](int n) -> ScanRec* { return n >= 1 && n <= (int)g_scans.size() ? &g_scans[n - 1] : nullptr; };
@@ -506,9 +507,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
         MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONWARNING); } } }
   bool autosaveTest = false, processTest = false; std::wstring cmdl = cmd ? cmd : L""; { size_t at = cmdl.find(L"--autosave-test"); if (at != std::wstring::npos) { autosaveTest = true; cmdl.erase(at, 15); }
     at = cmdl.find(L"--process-test"); if (at != std::wstring::npos) { processTest = true; cmdl.erase(at, 14); }
-    at = cmdl.find(L"--replay-bench"); if (at != std::wstring::npos) { size_t b = at + 14; while (b < cmdl.size() && cmdl[b] == L' ') b++; size_t e = cmdl.find(L' ', b); if (e == std::wstring::npos) e = cmdl.size(); g_benchCsv = cmdl.substr(b, e - b); cmdl.erase(at, e - at); replay::on = true; }
+    at = cmdl.find(L"--replay-bench"); if (at != std::wstring::npos) { size_t b = at + 14; while (b < cmdl.size() && cmdl[b] == L' ') b++; size_t e = cmdl.find(L' ', b); if (e == std::wstring::npos) e = cmdl.size(); g_benchCsv = cmdl.substr(b, e - b); cmdl.erase(at, e - at); replay::on = true; g_benchCsv.erase(std::remove(g_benchCsv.begin(), g_benchCsv.end(), L'"'), g_benchCsv.end()); }
     at = cmdl.find(L"--replay-from-mid"); if (at != std::wstring::npos) { g_benchMid = true; cmdl.erase(at, 17); }
-    at = cmdl.find(L"--replay-script"); if (at != std::wstring::npos) { size_t b = at + 15; while (b < cmdl.size() && cmdl[b] == L' ') b++; size_t e = cmdl.find(L' ', b); if (e == std::wstring::npos) e = cmdl.size(); g_scriptPath = cmdl.substr(b, e - b); cmdl.erase(at, e - at); replay::on = true; } cmdl.erase(std::remove(cmdl.begin(), cmdl.end(), L'"'), cmdl.end()); while (!cmdl.empty() && (cmdl.back() == L' ' || cmdl.back() == L'	')) cmdl.pop_back(); while (!cmdl.empty() && cmdl.front() == L' ') cmdl.erase(cmdl.begin()); }
+    at = cmdl.find(L"--replay-script"); if (at != std::wstring::npos) { size_t b = at + 15; while (b < cmdl.size() && cmdl[b] == L' ') b++; size_t e = cmdl.find(L' ', b); if (e == std::wstring::npos) e = cmdl.size(); g_scriptPath = cmdl.substr(b, e - b); cmdl.erase(at, e - at); replay::on = true; g_scriptPath.erase(std::remove(g_scriptPath.begin(), g_scriptPath.end(), L'"'), g_scriptPath.end()); } cmdl.erase(std::remove(cmdl.begin(), cmdl.end(), L'"'), cmdl.end()); while (!cmdl.empty() && (cmdl.back() == L' ' || cmdl.back() == L'	')) cmdl.pop_back(); while (!cmdl.empty() && cmdl.front() == L' ') cmdl.erase(cmdl.begin()); }
   // autosave recovery: passes recorded after the last save of a session that did not end normally
   if (cmdl.empty()) { auto rec = autosaveRecoverable(); for (auto& r : rec) { int n = (int)r.second.size();
       std::wstring q = L"ArtecRec did not close normally last time.\n\n" + std::to_wstring(n) + L" pass(es) recorded after the last save were autosaved (" + logic::leafOf(r.first) + L").\n\nLoad them now? Then save the project.\n\nNo = keep them and ask again next time.";
