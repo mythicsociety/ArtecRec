@@ -126,7 +126,7 @@ static void drawMesh(FrameMesh& m, const float* col, bool asPoints, bool allowTe
   if (hasCol) glDisableClientState(GL_COLOR_ARRAY); glDisable(GL_CULL_FACE); endVbo();
 }
 static void drawGrid() {
-  glDisable(GL_LIGHTING); glColor3f(0.42f, 0.43f, 0.46f); glBegin(GL_LINES); float s = 500, st = 25;
+  glDisable(GL_LIGHTING); glColor3f(0.70f, 0.70f, 0.72f); glBegin(GL_LINES); float s = 500, st = 25;
   for (float x = -s; x <= s; x += st) { glVertex3f(x, -s, 0); glVertex3f(x, s, 0); glVertex3f(-s, x, 0); glVertex3f(s, x, 0); } glEnd();
   glLineWidth(2); glBegin(GL_LINES); glColor3f(0.85f, 0.25f, 0.25f); glVertex3f(0, 0, 0); glVertex3f(60, 0, 0); glColor3f(0.25f, 0.8f, 0.25f); glVertex3f(0, 0, 0); glVertex3f(0, 60, 0); glColor3f(0.3f, 0.4f, 1.0f); glVertex3f(0, 0, 0); glVertex3f(0, 0, 60); glEnd(); glLineWidth(1);
 }
@@ -164,16 +164,16 @@ static const wchar_t* cubeLabels[6] = {L"Top", L"Front", L"Left", L"Right", L"Ba
 static bool fullView = false;      // panels hidden while scanning: show status + Pause/Stop in the viewport
 static float cubeX(int w) { return (float)std::max(w - 392, 84); }   /* the cube strip keeps right of the Fit button on a narrow view */
 static void drawButtons(int w, int h) {   // top-left: fit to view; top-right strip: navigation-cube faces
-  glColor4f(0, 0, 0, 0.12f); rect(10, 10, 60, 24); glColor3f(0.05f, 0.05f, 0.05f); text(18, 27, L"Fit  (F)");
-  for (int i = 0; i < 6; i++) { glColor4f(0, 0, 0, 0.12f); rect(cubeX(w) + i * 62, 10, 58, 24); glColor3f(0.05f, 0.05f, 0.05f); text(cubeX(w) + 6 + i * 62, 27, cubeLabels[i]); }
+  glColor4f(0.88f, 0.88f, 0.88f, 1); rect(10, 10, 60, 24); glColor3f(0, 0, 0); text(18, 27, L"Fit  (F)");
+  for (int i = 0; i < 6; i++) { glColor4f(0.88f, 0.88f, 0.88f, 1); rect(cubeX(w) + i * 62, 10, 58, 24); glColor3f(0, 0, 0); text(cubeX(w) + 6 + i * 62, 27, cubeLabels[i]); }
   if (fullView) { int m = g_mode.load(); double secs = g_recSecs + (m == M_Record ? std::chrono::duration<double>(clk::now() - g_recStart).count() : 0); wchar_t t[160], f[32];
     // Readable from 4–5 feet: 54 px fps, 30 px details, 30 px buttons.
     swprintf(f, 32, L"%.1f fps", fpsNow()); swprintf(t, 160, L"Surfaces: %ld     %d:%02d     Failures: %ld", g_frames.load(), (int)secs / 60, (int)secs % 60, g_regFail.load());
-    glColor4f(0, 0, 0, 0.45f); rect(130, h - 78.f, 820, 66); glColor3f(1, 1, 1); textBig(144, h - 28.f, f); textMid(370, h - 34.f, t);   // starts right of the range meter
+    glColor4f(0, 0, 0, 1); rect(130, h - 78.f, 820, 66); glColor3f(1, 1, 1); textBig(144, h - 28.f, f); textMid(370, h - 34.f, t);   // starts right of the range meter
     // A 5000-frame scan takes ~30 s to close and then a while to optimise: say so, as Studio's progress text does.
     const wchar_t* st = m == M_Stopping ? L"Stopping - finishing surfaces..." : (m == M_Idle && g_optimising.load()) ? L"Optimising surfaces..." : nullptr;   // bitmap font covers code points 0-255 only
-    if (st) { glColor4f(0.15f, 0.35f, 0.15f, 0.8f); rect(960, h - 78.f, 330, 66); glColor3f(1, 1, 1); textMid(972, h - 34.f, st); }
-    glColor4f(0.1f, 0.1f, 0.1f, 0.6f); rect(w - 300.f, h - 80.f, 140, 68); rect(w - 150.f, h - 80.f, 140, 68); glColor3f(1, 1, 1); textMid(w - 290.f, h - 34.f, m == M_Record ? L"Pause" : L"Record"); textMid(w - 112.f, h - 34.f, L"Stop"); }
+    if (st) { glColor4f(0.0f, 0.30f, 0.0f, 1); rect(960, h - 78.f, 330, 66); glColor3f(1, 1, 1); textMid(972, h - 34.f, st); }
+    glColor4f(0, 0, 0, 1); rect(w - 300.f, h - 80.f, 140, 68); rect(w - 150.f, h - 80.f, 140, 68); glColor3f(1, 1, 1); textMid(w - 290.f, h - 34.f, m == M_Record ? L"Pause" : L"Record"); textMid(w - 112.f, h - 34.f, L"Stop"); }
 }
 static int hitButton(int x, int y, int w, int h) { if (x >= 10 && x <= 70 && y >= 10 && y <= 34) return 100; for (int i = 0; i < 6; i++) if (x >= cubeX(w) + i * 62 && x <= cubeX(w) + 58 + i * 62 && y >= 10 && y <= 34) return cubeViews[i];
   if (fullView && y >= h - 80 && y <= h - 12) { if (x >= w - 300 && x <= w - 160) return 201; if (x >= w - 150 && x <= w - 10) return 202; } return -1; }
@@ -182,7 +182,7 @@ static void render(int w, int h, bool forShot) {
   int mode = g_mode.load(); bool lost = mode == M_Record && g_lostNow.load();
   { std::lock_guard<std::mutex> l(g_mx); if (follow && !forShot && !g_live.v.empty() && mode != M_Idle) for (int a = 0; a < 3; a++) target[a] += (g_liveCentre[a] - target[a]) * 0.25f; }
   setupCamera(w, h);
-  if (forShot) { if (S.shotBg == 1) glClearColor(0, 0, 0, 1); else glClearColor(1, 1, 1, 1); } else if (lost) glClearColor(0.66f, 0.50f, 0.50f, 1); else glClearColor(0.63f, 0.64f, 0.66f, 1);   // Studio: "dropped" background on misalignment
+  if (forShot) { if (S.shotBg == 1) glClearColor(0, 0, 0, 1); else glClearColor(1, 1, 1, 1); } else if (lost) glClearColor(1.0f, 0.86f, 0.66f, 1); else glClearColor(0.96f, 0.96f, 0.96f, 1);   /* 7 Nov (owner, daylight): near-white background, opaque high-contrast overlays */   // Studio: "dropped" background on misalignment
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   if (grid) drawGrid();
   bool scansAsPoints = renderMode == R_POINTSSOLID;
@@ -241,16 +241,16 @@ static void render(int w, int h, bool forShot) {
   // 4 Nov 16:54: after a second loss every frame failed for a minute (314 of 315) — the scanner saw nothing it could
   // track. After 6 s of that, say what to do, in plain words.
   { static clk::time_point lostSince; static bool wasLost = false; if (lost && !wasLost) lostSince = clk::now(); wasLost = lost;
-    if (lost && std::chrono::duration<double>(clk::now() - lostSince).count() > 6.0) { glColor4f(0.72f, 0.34f, 0.0f, 0.9f); rect(0, h / 2.f + 34, (float)w, 34); glColor3f(1, 1, 1); text(w / 2.f - 260, h / 2.f + 56, L"No usable surface: hold the scanner about 25 cm from carved stone, over an area already scanned"); } }
+    if (lost && std::chrono::duration<double>(clk::now() - lostSince).count() > 6.0) { glColor4f(0.85f, 0.0f, 0.0f, 1); rect(0, h / 2.f + 34, (float)w, 34); glColor3f(1, 1, 1); text(w / 2.f - 260, h / 2.f + 56, L"No usable surface: hold the scanner about 25 cm from carved stone, over an area already scanned"); } }
   // 7 Nov: a loss keeps the scan open (artecrec.cpp, logic::lossEndsScan); plain words on what to do
-  if (lost) { glColor4f(0.72f, 0.34f, 0.0f, 0.9f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 250, h / 2.f + 6, L"Tracking lost: go back to the last place you scanned, about 25 cm away. The scan continues."); }
-  else if (mode == M_Record && g_alignLive.load() && !g_liveFound.load()) { glColor4f(0.05f, 0.42f, 0.14f, 0.88f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
-  else if (mode == M_Record && g_liveFound.load() && std::chrono::duration<double>(clk::now() - (clk::time_point)g_lastSearch).count() < 3.0) { glColor4f(0.05f, 0.42f, 0.14f, 0.88f); rect(w / 2.f - 120, h - 60.f, 240, 30); glColor3f(1, 1, 1); text(w / 2.f - 55, h - 40.f, L"Position found"); }
-  if (g_overheated.load()) { glColor4f(0.72f, 0.34f, 0.0f, 0.9f); rect(0, 44, (float)w, 30); glColor3f(1, 1, 1); text(w / 2.f - 160, 64, L"Scanner overheated — let it cool before continuing"); }
-  int cd = g_countdown.load(); if (cd > 0) { wchar_t t[32]; swprintf(t, 32, L"Recording in %d…", cd); glColor4f(0, 0, 0, 0.5f); rect(w / 2.f - 100, h / 2.f - 30, 200, 60); glColor3f(1, 1, 1); text(w / 2.f - 60, h / 2.f + 6, t); }
+  if (lost) { glColor4f(1.0f, 0.80f, 0.0f, 1); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(0, 0, 0); text(w / 2.f - 250, h / 2.f + 6, L"Tracking lost: go back to the last place you scanned, about 25 cm away. The scan continues."); }
+  else if (mode == M_Record && g_alignLive.load() && !g_liveFound.load()) { glColor4f(0.0f, 0.35f, 0.0f, 1); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
+  else if (mode == M_Record && g_liveFound.load() && std::chrono::duration<double>(clk::now() - (clk::time_point)g_lastSearch).count() < 3.0) { glColor4f(0.0f, 0.35f, 0.0f, 1); rect(w / 2.f - 120, h - 60.f, 240, 30); glColor3f(1, 1, 1); text(w / 2.f - 55, h - 40.f, L"Position found"); }
+  if (g_overheated.load()) { glColor4f(0.85f, 0.0f, 0.0f, 1); rect(0, 44, (float)w, 30); glColor3f(1, 1, 1); text(w / 2.f - 160, 64, L"Scanner overheated — let it cool before continuing"); }
+  int cd = g_countdown.load(); if (cd > 0) { wchar_t t[32]; swprintf(t, 32, L"Recording in %d…", cd); glColor4f(0, 0, 0, 1); rect(w / 2.f - 100, h / 2.f - 30, 200, 60); glColor3f(1, 1, 1); text(w / 2.f - 60, h / 2.f + 6, t); }
   // 7 Nov (owner: "he is not tech savvy"): every wait says so in plain words, in the middle of the screen, with the way out
-  if (mode == M_Aligning) { glColor4f(0.05f, 0.05f, 0.05f, 0.75f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 250, h / 2.f + 6, L"Please wait: placing the passes. Record is back in a moment. (Edit > Cancel processing to skip)"); }
-  if (mode == M_Busy) { glColor4f(0.05f, 0.05f, 0.05f, 0.75f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Please wait: working on the scans. Press Esc to stop and keep them as they are."); }
+  if (mode == M_Aligning) { glColor4f(0, 0, 0, 1); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 250, h / 2.f + 6, L"Please wait: placing the passes. Record is back in a moment. (Edit > Cancel processing to skip)"); }
+  if (mode == M_Busy) { glColor4f(0, 0, 0, 1); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Please wait: working on the scans. Press Esc to stop and keep them as they are."); }
   overlayEnd();
 }
 // Redraw only when something changed (new frame, input, project change) or every 400 ms. Drawing a large scan on every
