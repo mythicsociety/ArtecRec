@@ -150,3 +150,13 @@ First field proof 10:44:51: tracking lost, back after 2.1 s, same scan continued
 Between stone 3 (Trail30, saved 10:50, 91 s) and stone 4. View zoom reset to 320 mm at Record/Preview when it was
 over 450 ("the green box shrinks": an unplaced pass far from the placed ones zoomed the fit out); Field mode default on;
 plain "Please wait" banners for aligning / busy. Unit 66/0; field-mode-check 7/7 on this build. Previous exe in .prev.
+
+### 7 Nov museum day — summary (builds 06:55 -> 10:33 -> 10:48 -> 10:53 -> 11:18, all installed between stones)
+Stone 1 (low-medium, build 06:55): 16 min scanning, 19 min to placed, 7 passes; texture join failing on photo size,
+after-Stop auto-align 31-184 s, 22 GB memory, save 278 s. Stone 2 (small-low, 06:55): ~21 min, 13 scans, losses every
+10-15 s at the edge over a blue tarp. Stone 3 (10:33/10:48, Field mode): 9 min, 3 real passes, nothing processed,
+save 91 s (Trail30). Stone 4 (medium, 10:48 -> 11:18 Daylight): 11:00-11:36, Trail31 saved at 11:17 (178 s) and again
+at the end; 10 scans; ~20 losses of 0.1-7 s all ridden out in the same scan; passes 600-1,021 frames; battery-contact
+disconnects at 10:42, 10:56, 10:58, 11:38. Daylight mode not liked (dark surfaces) -> toggled off; the near-white
+background and opaque bars stay. Owner: Studio users find ArtecRec hard; Field mode + loss handling + plain banners
+were the response. Open: the view/panel size while recording, a one-switch simplification, the 2.0 s stall check.
