@@ -145,3 +145,8 @@ Stone timings (build 06:55): stone 1 (low-medium) 16 min scanning, 19 min to pla
 Reruns alone on the installed build: loss-check 5/5; field-mode-check 7/7 after the field-day script was given a real
 overlap for pass 2 (150 frames; the old 50-frame resume never joined in replay, its one FOUND came from the loss restart).
 First field proof 10:44:51: tracking lost, back after 2.1 s, same scan continued (stone 3, Field mode, 4 passes kept as recorded).
+
+### 7 Nov 10:51 — INSTALLED: build 10:48 (commit "View stays on the live pass..."), MD5 a4549029f27d7cdddadbc875908d3253
+Between stone 3 (Trail30, saved 10:50, 91 s) and stone 4. View zoom reset to 320 mm at Record/Preview when it was
+over 450 ("the green box shrinks": an unplaced pass far from the placed ones zoomed the fit out); Field mode default on;
+plain "Please wait" banners for aligning / busy. Unit 66/0; field-mode-check 7/7 on this build. Previous exe in .prev.
