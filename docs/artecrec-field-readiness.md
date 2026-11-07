@@ -125,3 +125,10 @@ code is in the previous field build.
 
 1. Worker lifecycle and SDK cancellation architecture. 2. Asynchronous scanner reconnection. 3. Rendering/memory
 optimisation from field measurements. 4. Fault-injection tests. 5. Build reproducibility / portable tests.
+
+### 7 Nov 09:50 — build 1b15788 (not installed; museum day in progress)
+Trail29 (Madhusudhan, lab, 09:34-): the live search spent its whole time on the texture join, which the SDK refuses
+(reference photos 960x1280, live 480x640 — confirmed by the diagnostic line at 08:46 and 09:39). Three tries of ~6 s
+each, so the geometry search was cut off at Stop (0x00010105 in 0.0 s) on every short pass; passes were placed only by
+the after-Stop auto-align (31 s). Fix: logic::textureJoinPossible — different sizes -> skip the texture join, geometry
+at once. Unit 64/0; field-day replay 9/9 (same-size frames, texture join unaffected). MD5 4848ca4545ea6b20c058f9e57b7933b0.
