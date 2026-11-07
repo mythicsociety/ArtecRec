@@ -100,10 +100,11 @@ static void surfaceColour(int k, float c[3]) { float h = fmodf(k * 0.61803f, 1.f
 static void drawMesh(FrameMesh& m, const float* col, bool asPoints, bool allowTexture = true, bool texFill = false) {
   if (m.v.empty()) return; bool vb = useVbo(m); const unsigned* ix = vb ? nullptr : m.idx.data();
   glVertexPointer(3, GL_FLOAT, 0, vb ? (const void*)0 : (const void*)m.v.data());
+  static const float dayCol[3] = {0.10f, 0.14f, 0.28f}; if (S.daylight) col = dayCol;   // 7 Nov daylight mode: dark slate surfaces on white, no photo texture (grey on grey is unreadable in the sun)
   bool hasCol = !m.col.empty(); if (hasCol) { glEnableClientState(GL_COLOR_ARRAY); glColorPointer(3, GL_FLOAT, 0, vb ? (const void*)m.offCol : (const void*)m.col.data()); } else glColor3fv(col);
   bool solid = !asPoints && (renderMode == R_SOLID || renderMode == R_WIRESOLID || renderMode == R_POINTSSOLID), wire = !asPoints && (renderMode == R_WIRE || renderMode == R_WIRESOLID), points = asPoints || renderMode == R_POINTS;
   if (m.idx.empty()) points = true;
-  bool textured = solid && allowTexture && colorMode == 0 && !hasCol && bindTexture(m); if (textured) glColor3f(1, 1, 1);
+  bool textured = solid && allowTexture && colorMode == 0 && !hasCol && !S.daylight && bindTexture(m); if (textured) glColor3f(1, 1, 1);
   { bool tl = textured || texFill; float a = tl ? 0.7f : 0.25f, d = tl ? 0.55f : 0.85f; float amb[] = {a, a, a, 1}, dif[] = {d, d, d, 1}; glLightfv(GL_LIGHT0, GL_AMBIENT, amb); glLightfv(GL_LIGHT0, GL_DIFFUSE, dif); }   // Studio-like brightness on textured surfaces
   if (backface == 1) { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); } else glDisable(GL_CULL_FACE);
   if (solid) {
@@ -178,11 +179,16 @@ static void drawButtons(int w, int h) {   // top-left: fit to view; top-right st
 static int hitButton(int x, int y, int w, int h) { if (x >= 10 && x <= 70 && y >= 10 && y <= 34) return 100; for (int i = 0; i < 6; i++) if (x >= cubeX(w) + i * 62 && x <= cubeX(w) + 58 + i * 62 && y >= 10 && y <= 34) return cubeViews[i];
   if (fullView && y >= h - 80 && y <= h - 12) { if (x >= w - 300 && x <= w - 160) return 201; if (x >= w - 150 && x <= w - 10) return 202; } return -1; }
 
+// 7 Nov: one way to say something across the screen; daylight mode uses the 30 px semibold font and a taller strip
+static void banner(float w, float yMid, const wchar_t* s, float r, float g, float b, bool darkText) {
+  float hh = S.daylight ? 44.f : 30.f; glColor4f(r, g, b, 1); rect(0, yMid - hh, w, hh * 2); glColor3f(darkText ? 0 : 1, darkText ? 0 : 1, darkText ? 0 : 1);
+  float cw = S.daylight ? uik(30) * 0.47f : uik(15) * 0.5f; float x = w / 2.f - (float)wcslen(s) * cw / 2.f; if (x < 8) x = 8;
+  if (S.daylight) textMid(x, yMid + 11, s); else text(x, yMid + 6, s); }
 static void render(int w, int h, bool forShot) {
   int mode = g_mode.load(); bool lost = mode == M_Record && g_lostNow.load();
   { std::lock_guard<std::mutex> l(g_mx); if (follow && !forShot && !g_live.v.empty() && mode != M_Idle) for (int a = 0; a < 3; a++) target[a] += (g_liveCentre[a] - target[a]) * 0.25f; }
   setupCamera(w, h);
-  if (forShot) { if (S.shotBg == 1) glClearColor(0, 0, 0, 1); else glClearColor(1, 1, 1, 1); } else if (lost) glClearColor(1.0f, 0.86f, 0.66f, 1); else glClearColor(0.96f, 0.96f, 0.96f, 1);   /* 7 Nov (owner, daylight): near-white background, opaque high-contrast overlays */   // Studio: "dropped" background on misalignment
+  if (forShot) { if (S.shotBg == 1) glClearColor(0, 0, 0, 1); else glClearColor(1, 1, 1, 1); } else if (lost) glClearColor(1.0f, 0.86f, 0.66f, 1); else if (S.daylight) glClearColor(1, 1, 1, 1); else glClearColor(0.96f, 0.96f, 0.96f, 1);   /* 7 Nov (owner, daylight): near-white background, opaque high-contrast overlays */   // Studio: "dropped" background on misalignment
   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
   if (grid) drawGrid();
   bool scansAsPoints = renderMode == R_POINTSSOLID;
@@ -241,16 +247,16 @@ static void render(int w, int h, bool forShot) {
   // 4 Nov 16:54: after a second loss every frame failed for a minute (314 of 315) — the scanner saw nothing it could
   // track. After 6 s of that, say what to do, in plain words.
   { static clk::time_point lostSince; static bool wasLost = false; if (lost && !wasLost) lostSince = clk::now(); wasLost = lost;
-    if (lost && std::chrono::duration<double>(clk::now() - lostSince).count() > 6.0) { glColor4f(0.85f, 0.0f, 0.0f, 1); rect(0, h / 2.f + 34, (float)w, 34); glColor3f(1, 1, 1); text(w / 2.f - 260, h / 2.f + 56, L"No usable surface: hold the scanner about 25 cm from carved stone, over an area already scanned"); } }
+    if (lost && std::chrono::duration<double>(clk::now() - lostSince).count() > 6.0) banner((float)w, h / 2.f + 80, L"No usable surface: hold the scanner 25 cm from carved stone, over an area already scanned", 0.85f, 0, 0, false); }
   // 7 Nov: a loss keeps the scan open (artecrec.cpp, logic::lossEndsScan); plain words on what to do
-  if (lost) { glColor4f(1.0f, 0.80f, 0.0f, 1); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(0, 0, 0); text(w / 2.f - 250, h / 2.f + 6, L"Tracking lost: go back to the last place you scanned, about 25 cm away. The scan continues."); }
-  else if (mode == M_Record && g_alignLive.load() && !g_liveFound.load()) { glColor4f(0.0f, 0.35f, 0.0f, 1); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Searching for position: Point 3D scanner at the object to continue"); }
+  if (lost) banner((float)w, h / 2.f, L"Tracking lost: go back over the last scanned area, 25 cm away. The scan continues.", 1.0f, 0.80f, 0, true);
+  else if (mode == M_Record && g_alignLive.load() && !g_liveFound.load()) banner((float)w, h / 2.f, L"Searching for position: point the scanner at the scanned surface", 0, 0.35f, 0, false);
   else if (mode == M_Record && g_liveFound.load() && std::chrono::duration<double>(clk::now() - (clk::time_point)g_lastSearch).count() < 3.0) { glColor4f(0.0f, 0.35f, 0.0f, 1); rect(w / 2.f - 120, h - 60.f, 240, 30); glColor3f(1, 1, 1); text(w / 2.f - 55, h - 40.f, L"Position found"); }
-  if (g_overheated.load()) { glColor4f(0.85f, 0.0f, 0.0f, 1); rect(0, 44, (float)w, 30); glColor3f(1, 1, 1); text(w / 2.f - 160, 64, L"Scanner overheated — let it cool before continuing"); }
+  if (g_overheated.load()) banner((float)w, 70, L"Scanner overheated: let it cool before continuing", 0.85f, 0, 0, false);
   int cd = g_countdown.load(); if (cd > 0) { wchar_t t[32]; swprintf(t, 32, L"Recording in %d…", cd); glColor4f(0, 0, 0, 1); rect(w / 2.f - 100, h / 2.f - 30, 200, 60); glColor3f(1, 1, 1); text(w / 2.f - 60, h / 2.f + 6, t); }
   // 7 Nov (owner: "he is not tech savvy"): every wait says so in plain words, in the middle of the screen, with the way out
-  if (mode == M_Aligning) { glColor4f(0, 0, 0, 1); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 250, h / 2.f + 6, L"Please wait: placing the passes. Record is back in a moment. (Edit > Cancel processing to skip)"); }
-  if (mode == M_Busy) { glColor4f(0, 0, 0, 1); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Please wait: working on the scans. Press Esc to stop and keep them as they are."); }
+  if (mode == M_Aligning) banner((float)w, h / 2.f, L"Please wait: placing the passes. (Edit > Cancel processing to skip)", 0, 0, 0, false);
+  if (mode == M_Busy) banner((float)w, h / 2.f, L"Please wait: working on the scans. Esc stops and keeps them as they are.", 0, 0, 0, false);
   overlayEnd();
 }
 // Redraw only when something changed (new frame, input, project change) or every 400 ms. Drawing a large scan on every

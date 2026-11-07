@@ -154,6 +154,7 @@ struct Settings {
   std::atomic<bool> distColor{true};   // read on the scanning and tidy-up threads (DeepSeek 2)
   bool autoAlign = false, hidePanel = false, recordTexture = true, flash = true, autoBright = true, audio = true;
   bool scanUsingAutoAlign = true;   // Settings > Scan > "Scan using auto-alignment" (default on)
+  bool daylight = false;          // 7 Nov (owner, museum): View > Daylight mode - white background, dark surfaces without photo texture, big bold banners
   bool fieldMode = true;            // 7 Nov (owner, museum day): ON by default. Record only; no clean-up, optimisation or auto-align after Stop - the passes are placed in the lab (Edit menu / Studio). Battery time is precious.
   int shotBg = 0;                   // screenshot background: 0 white, 1 black
   std::atomic<float> nearMm{170.f}, farMm{330.f};
