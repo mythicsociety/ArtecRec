@@ -160,3 +160,4 @@ at the end; 10 scans; ~20 losses of 0.1-7 s all ridden out in the same scan; pas
 disconnects at 10:42, 10:56, 10:58, 11:38. Daylight mode not liked (dark surfaces) -> toggled off; the near-white
 background and opaque bars stay. Owner: Studio users find ArtecRec hard; Field mode + loss handling + plain banners
 were the response. Open: the view/panel size while recording, a one-switch simplification, the 2.0 s stall check.
+Full laptop log of the day archived: docs/logs/2026-11-07-museum.log (1.19 MB). After the 10:33 build: 23 losses ridden out in the same scan, median 1.0 s, longest 7.1 s.
