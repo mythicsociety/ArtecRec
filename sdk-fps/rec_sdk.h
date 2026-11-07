@@ -549,6 +549,10 @@ static bool hybridResume(const HybridWindow& win, double T[4][4], int& nRef, int
   nRef = R->getSize(); std::vector<Matrix4x4D> probeIn;
   { std::lock_guard<std::mutex> l(g_tempMx); if (!g_tempTex || g_tempTex->getSize() < 3) { R->release(); return false; } for (int j = 0; j < g_tempTex->getSize(); j++) { R->add(g_tempTex->getElement(j), g_tempTex->getTransformation(j)); probeIn.push_back(g_tempTex->getTransformation(j)); } }
   nProbe = (int)probeIn.size(); ensureNormals(R);
+  // 7 Nov diagnostic: "can't register surfaces with different texture image scales" (113 of 201 searches on 6 Nov) -
+  // log the texture image sizes of the reference and the probe frames, once a minute
+  { static clk::time_point lastTexLog; if (std::chrono::duration<double>(clk::now() - lastTexLog).count() > 60) { lastTexLog = clk::now(); auto dims = [](IFrameMesh* f, int& w, int& h) { w = h = 0; if (f && f->isTextured()) { IImage* im = f->getImage(); if (im) { w = im->getWidth(); h = im->getHeight(); } } };
+      int rw, rh, pw, ph; dims(R->getElement(0), rw, rh); dims(R->getElement(nRef), pw, ph); logf("hybrid resume textures: reference frame %dx%d, probe frame %dx%d%s", rw, rh, pw, ph, (rw != pw || rh != ph) ? " <- DIFFERENT (the SDK refuses to register them)" : ""); } }
   IModel* in = nullptr; createModel(&in); in->add(R); IModel* out = nullptr; createModel(&out);
   alg::SerialRegistrationSettings sd; sd.scannerType = src->getScannerType(); sd.registrationType = alg::SerialRegistrationType_RoughTextured; alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createSerialRegistrationAlgorithm(&a, &sd);
   auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = std::thread::hardware_concurrency(); ec = execLimited(a, &ws, 20, "position search", &g_searchStop); a->release(); }

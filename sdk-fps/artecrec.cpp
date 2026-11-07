@@ -60,17 +60,27 @@ static void doStop() { g_countdown = 0; int m = g_mode.load(); if (m == M_Record
 // Each scan of the opened project is replayed in turn as a new pass against the other scans (the scan itself is hidden
 // meanwhile). What a person would see is measured: did it join live and after how many tries, where it ended up after
 // Stop and after the tidy-up/auto-align compared with its saved position, and whether the other scans stayed put.
-static std::wstring g_benchCsv, g_scriptPath; static bool g_benchMid = false;
+static std::wstring g_benchCsv, g_scriptPath; static bool g_benchMid = false, g_benchOverlap = false;
 namespace bench {
 static bool active = false; static std::wstring out; static int phase = 0, run = -1, scanIdx = -1, countBefore = 0, fedAtJoin = 0, tries = 0; static const int LIMIT = 150;
 static clk::time_point t0, tJoin; static bool sawJoin = false, liveJoined = false; static double errStop = -1; static Matrix4x4D truth;
 static std::vector<int> order; static std::vector<std::pair<IScan*, Matrix4x4D>> anchors; static int nOk = 0, nWrong = 0, nAligned = 0, nAlignedWrong = 0, nNot = 0, nAnchorMoved = 0, nUncertain = 0, nNoOverlap = 0;
-static double truthMoved = -1, truthShare = 0; static bool truthOk = false;
+static double truthMoved = -1, truthShare = 0; static bool truthOk = false; static int benchFrom = 0;
 // Finished model (owner, 7 Nov: "the finished models for these projects exist"): the fused, fully aligned surface from
 // D:\ArtecReplay\models\<corpus folder>\*.ply|obj|stl. A pass is judged by the share of its points within 2 mm of it,
 // independent of the saved pass positions. The model's frame is checked against the saved passes first (and fitted
 // to them with ICP if it was exported in another frame).
 static pa::Model model; static bool haveModel = false, modelTried = false; static double modelC[4][4]; static double modelFrameShare = 0, truthModelFit = -1; static int nModelOk = 0, nModelOff = 0;
+// Where does this pass overlap the other visible passes most? Frame windows of 24 are scored by the share of their
+// points within 6 mm of the others (pa::Model of their references); the best window's first frame is the start.
+static int bestOverlapStart(IScan* src, int window, double& bestShare) {
+  pa::Model M; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& rec : g_scans) { if (rec.scan == src || !rec.visible || !rec.ref || !rec.scan) continue; pa::worldPts(rec.ref, 1, 10, true, M.pts, &M.nrm, rec.scan->getScanTransformation().m); } }
+  bestShare = -1; if (M.pts.size() < 3000 * 3) return 0; M.build(); int n = src->getSize(), best = 0; Matrix4x4D ST = src->getScanTransformation();
+  for (int k0 = 0; k0 + window <= n; k0 += std::max(1, window / 3)) { int hit = 0, tot = 0;
+    for (int k = k0; k < k0 + window; k += 4) { IFrameMesh* f = src->getElement(k); if (!f) continue; double W[4][4]; mul44(ST.m, src->getTransformation(k).m, W); IArrayPoint3F* pts = f->getPoints(); if (!pts) continue; int np = pts->getSize(); const Point3F* p = pts->getPointer();
+      for (int i = 0; i < np; i += 50) { float q[3] = {(float)(W[0][0] * p[i].x + W[0][1] * p[i].y + W[0][2] * p[i].z + W[0][3]), (float)(W[1][0] * p[i].x + W[1][1] * p[i].y + W[1][2] * p[i].z + W[1][3]), (float)(W[2][0] * p[i].x + W[2][1] * p[i].y + W[2][2] * p[i].z + W[2][3])}; const float* pp; const float* nn; tot++; if (M.nearest(q, 6.0f, pp, nn)) hit++; } }
+    double sh = tot ? (double)hit / tot : 0; if (sh > bestShare) { bestShare = sh; best = k0; } }
+  return best; }
 static double shareOn(const std::vector<float>& P, float maxd) { int n = (int)P.size() / 3, hit = 0; for (int i = 0; i < n; i++) { float q[3] = {P[i * 3], P[i * 3 + 1], P[i * 3 + 2]}; if (!isIdentity(modelC)) { float x = (float)(modelC[0][0] * q[0] + modelC[0][1] * q[1] + modelC[0][2] * q[2] + modelC[0][3]), y = (float)(modelC[1][0] * q[0] + modelC[1][1] * q[1] + modelC[1][2] * q[2] + modelC[1][3]), z = (float)(modelC[2][0] * q[0] + modelC[2][1] * q[1] + modelC[2][2] * q[2] + modelC[2][3]); q[0] = x; q[1] = y; q[2] = z; } const float* pp; const float* nn; if (model.nearest(q, maxd, pp, nn)) hit++; } return n ? (double)hit / n : 0; }
 static bool loadModel() {
   haveModel = false; setIdentity(modelC); model = pa::Model(); std::wstring corpusDir = projDir(g_projPath); std::wstring mdir = corpusDir + L"\\Model"; if (!dirExists(mdir)) mdir = L"D:\\ArtecReplay\\models\\" + logic::leafOf(corpusDir); std::wstring file;   /* <project>\Model (finished projects), else the matched-model folder */
@@ -122,11 +132,11 @@ static void step() {
     truthModelFit = -1; if (haveModel) { std::vector<float> P; pa::worldPts(src, std::max(1, src->getSize() / 40), 20, false, P, nullptr); truthModelFit = shareOn(P, 2.0f); }
     g_scans[scanIdx].visible = false; ws::refresh();
     anchors.clear(); for (int i = 0; i < (int)g_scans.size(); i++) if (i != scanIdx && g_scans[i].scan) anchors.push_back({g_scans[i].scan, g_scans[i].scan->getScanTransformation()});
-    countBefore = (int)g_scans.size(); int from = g_benchMid ? src->getSize() / 2 : 0; replay::setSource(src, from, std::min(src->getSize(), from + LIMIT)); sawJoin = liveJoined = false; errStop = -1; tries = 0; t0 = clk::now();
+    countBefore = (int)g_scans.size(); int from = g_benchMid ? src->getSize() / 2 : 0; double ovl = -1; if (g_benchOverlap) { from = bestOverlapStart(src, 24, ovl); logf("replay bench: start frame %d (overlap with the other passes %.0f%%)", from, ovl * 100); } replay::setSource(src, from, std::min(src->getSize(), from + LIMIT)); benchFrom = from; sawJoin = liveJoined = false; errStop = -1; tries = 0; t0 = clk::now();
     logf("replay bench: run %d/%d, scan %d \"%ls\" (%d frames) replayed against %d other scan(s)", run + 1, (int)order.size(), scanIdx + 1, g_scans[scanIdx].name.c_str(), src->getSize(), (int)anchors.size());
     beginRecordNow(); if (g_mode.load() != M_Record) { logf("replay bench: recording did not start; run skipped"); g_scans[scanIdx].visible = true; return; } phase = 1; return; }
   if (phase == 1) { if (!sawJoin && g_liveFound.load()) { sawJoin = true; tJoin = clk::now(); fedAtJoin = replay::fed.load(); }
-    int want = std::min(g_scans[scanIdx].scan->getSize() - (g_benchMid ? g_scans[scanIdx].scan->getSize() / 2 : 0), LIMIT);
+    int want = std::min(g_scans[scanIdx].scan->getSize() - benchFrom, LIMIT);
     if ((sawJoin && replay::fed.load() >= fedAtJoin + 40) || replay::fed.load() >= want || secs(t0, clk::now()) > 90) { tries = g_searchTries.load(); doStop(); phase = 2; } return; }
   if (phase == 2) { if (m != M_Idle) return;   /* jobDone ran: the new scan is in the Workspace; its tidy-up may still run */
     if ((int)g_scans.size() > countBefore) { auto& r = g_scans.back(); liveJoined = r.placed; if (r.placed && r.scan) errStop = errOf(g_scans[scanIdx].scan, r.scan->getScanTransformation()); } phase = 3; return; }
@@ -509,6 +519,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
     at = cmdl.find(L"--process-test"); if (at != std::wstring::npos) { processTest = true; cmdl.erase(at, 14); }
     at = cmdl.find(L"--replay-bench"); if (at != std::wstring::npos) { size_t b = at + 14; while (b < cmdl.size() && cmdl[b] == L' ') b++; size_t e = cmdl.find(L' ', b); if (e == std::wstring::npos) e = cmdl.size(); g_benchCsv = cmdl.substr(b, e - b); cmdl.erase(at, e - at); replay::on = true; g_benchCsv.erase(std::remove(g_benchCsv.begin(), g_benchCsv.end(), L'"'), g_benchCsv.end()); }
     at = cmdl.find(L"--replay-from-mid"); if (at != std::wstring::npos) { g_benchMid = true; cmdl.erase(at, 17); }
+    at = cmdl.find(L"--replay-from-overlap"); if (at != std::wstring::npos) { g_benchOverlap = true; cmdl.erase(at, 21); }
     at = cmdl.find(L"--replay-script"); if (at != std::wstring::npos) { size_t b = at + 15; while (b < cmdl.size() && cmdl[b] == L' ') b++; size_t e = cmdl.find(L' ', b); if (e == std::wstring::npos) e = cmdl.size(); g_scriptPath = cmdl.substr(b, e - b); cmdl.erase(at, e - at); replay::on = true; g_scriptPath.erase(std::remove(g_scriptPath.begin(), g_scriptPath.end(), L'"'), g_scriptPath.end()); } cmdl.erase(std::remove(cmdl.begin(), cmdl.end(), L'"'), cmdl.end()); while (!cmdl.empty() && (cmdl.back() == L' ' || cmdl.back() == L'	')) cmdl.pop_back(); while (!cmdl.empty() && cmdl.front() == L' ') cmdl.erase(cmdl.begin()); }
   // autosave recovery: passes recorded after the last save of a session that did not end normally
   if (cmdl.empty()) { auto rec = autosaveRecoverable(); for (auto& r : rec) { int n = (int)r.second.size();
