@@ -49,6 +49,17 @@ Reading: with little overlap the join or auto-align lands 4-8 mm off while still
 rule stays: resume over surface already scanned, with generous overlap. Live joins from a mid-pass start are rare
 (1 of 7 tried): the first frames of a resume are often over fresh surface.
 
+## Two things the replay cannot judge
+
+- **Re-optimisation of the frames.** The replayed frames are already registered by Studio. ArtecRec's surface
+  optimisation then re-registers them, and in replay that goes either way (Garudakamba pass 2: 86 % -> 95 % on the
+  model; temple basement pass 1: 95 % -> 74 %), with SDK warnings about texture quality. The verdict therefore uses
+  `modelFitRigid` (the source frames under the new pass's placement). Whether the optimisation helps raw field frames
+  is a field question.
+- **The texture join.** Replayed reference and probe frames share one texture size, so the field failure "can't
+  register surfaces with different texture image scales" (113 of 201 searches on 6 Nov) never shows in replay. The
+  `hybrid resume textures:` log line (reference vs probe image size) must come from a field session.
+
 ## How to run
 
 1. Copy projects: `tests/replay/finished-copy.ps1 -List <list of relative .sproj paths>` (NAS read-only; needs the

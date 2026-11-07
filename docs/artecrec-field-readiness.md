@@ -80,6 +80,15 @@ sizes are too small"), plus the replay source and benchmark (no effect in normal
 1090C9C35081A92FCBBB160BC7F2B5C6, artecrec-fs.exe 7ED43F6E5F37AC7CE49836F665835D06. Previous build kept as
 D:\ArtecDiag\artecrec-prev-5cecaf3.exe. Tests 103/0/0.
 
+## Installed 7 Nov 07:42 (owner: "if there is a new build by 830 AM you can install it")
+
+Commit `2b02a16`: adds a diagnostic log line in the live texture join ("hybrid resume textures: reference WxH, probe
+WxH") to confirm the texture-scale hypothesis; the rest of the commit is replay/benchmark code, inactive in normal use.
+artecrec.exe MD5 C48F8D465E93DA829896C2E51CBCB00B, artecrec-fs.exe 8BE8EE8B2EC344297F0DA3314F155E56. Previous build
+kept as D:\ArtecDiag\artecrec-prev-51bcf56.exe. Suite 102/1: the one failure is a 2.5 s window stall
+while cancelling 7 optimisations at once (responsiveness check), measured with a 40 GB copy running on the PC; the same
+code is in the previous field build.
+
 ## Still needing a field check (verified by code reading only)
 
 | Item | How the acceptance session or the trip shows it |
