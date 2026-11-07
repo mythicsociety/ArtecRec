@@ -248,7 +248,9 @@ static void render(int w, int h, bool forShot) {
   else if (mode == M_Record && g_liveFound.load() && std::chrono::duration<double>(clk::now() - (clk::time_point)g_lastSearch).count() < 3.0) { glColor4f(0.05f, 0.42f, 0.14f, 0.88f); rect(w / 2.f - 120, h - 60.f, 240, 30); glColor3f(1, 1, 1); text(w / 2.f - 55, h - 40.f, L"Position found"); }
   if (g_overheated.load()) { glColor4f(0.72f, 0.34f, 0.0f, 0.9f); rect(0, 44, (float)w, 30); glColor3f(1, 1, 1); text(w / 2.f - 160, 64, L"Scanner overheated — let it cool before continuing"); }
   int cd = g_countdown.load(); if (cd > 0) { wchar_t t[32]; swprintf(t, 32, L"Recording in %d…", cd); glColor4f(0, 0, 0, 0.5f); rect(w / 2.f - 100, h / 2.f - 30, 200, 60); glColor3f(1, 1, 1); text(w / 2.f - 60, h / 2.f + 6, t); }
-  if (mode == M_Aligning) { glColor4f(0, 0, 0, 0.5f); rect(w / 2.f - 100, h - 60.f, 200, 30); glColor3f(1, 1, 1); text(w / 2.f - 50, h - 40.f, L"Auto-aligning…"); }
+  // 7 Nov (owner: "he is not tech savvy"): every wait says so in plain words, in the middle of the screen, with the way out
+  if (mode == M_Aligning) { glColor4f(0.05f, 0.05f, 0.05f, 0.75f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 250, h / 2.f + 6, L"Please wait: placing the passes. Record is back in a moment. (Edit > Cancel processing to skip)"); }
+  if (mode == M_Busy) { glColor4f(0.05f, 0.05f, 0.05f, 0.75f); rect(0, h / 2.f - 30, (float)w, 60); glColor3f(1, 1, 1); text(w / 2.f - 200, h / 2.f + 6, L"Please wait: working on the scans. Press Esc to stop and keep them as they are."); }
   overlayEnd();
 }
 // Redraw only when something changed (new frame, input, project change) or every 400 ms. Drawing a large scan on every

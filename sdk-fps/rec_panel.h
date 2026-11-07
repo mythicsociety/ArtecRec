@@ -133,7 +133,7 @@ static void loadIni() {
   chk(cNoTex, !ri(L"recordTexture", 1)); chk(cNoFlash, !ri(L"flash", 1)); int tf = ri(L"texFreq", 0); chk(rFreqAuto, tf == 0); chk(rFreqN, tf == 1); wchar_t b[32];
   swprintf(b, 32, L"%d", ri(L"texEvery", 1)); SetWindowTextW(eFreqN, b); swprintf(b, 32, L"%d", ri(L"delay", 0)); SetWindowTextW(eDelay, b); chk(cLimit, ri(L"limitFrames", 0)); swprintf(b, 32, L"%d", ri(L"frameLimit", 2000)); SetWindowTextW(eLimit, b);
   wchar_t nm[128] = L""; GetPrivateProfileStringW(L"scan", L"scanName", L"", nm, 128, f.c_str()); SetWindowTextW(eName, nm);
-  S.audio = ri(L"audio", 1); S.scanUsingAutoAlign = ri(L"scanUsingAutoAlign", 1); S.fieldMode = ri(L"fieldMode", 0) != 0; S.shotBg = ri(L"shotBg", 0); bool adv = ri(L"advOpen", 1); if (adv != advOpen) toggleAdvanced();
+  S.audio = ri(L"audio", 1); S.scanUsingAutoAlign = ri(L"scanUsingAutoAlign", 1); S.fieldMode = ri(L"fieldMode", 1) != 0; S.shotBg = ri(L"shotBg", 0); bool adv = ri(L"advOpen", 1); if (adv != advOpen) toggleAdvanced();
   readSettings(); iniLoaded = true; logf("settings loaded from %ls (autoAlign %d, tracking %d, speed %d)", f.c_str(), (int)S.autoAlign, S.tracking, S.speed);
 }
 static void toggleAdvanced() { advOpen = !advOpen; SetWindowTextW(bAdv, advOpen ? L"Advanced  —" : L"Advanced  +"); layout(); InvalidateRect(hwnd, nullptr, TRUE); }

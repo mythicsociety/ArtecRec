@@ -39,7 +39,7 @@ static void beginRecordNow() {
   else if (m == M_Preview && (g_proc || replay::on)) { prepareRecording(true); procSetState(ScanningState_Record); g_mode = M_Record; g_recSecs = 0; g_recStart = clk::now(); }
   else if (m == M_Paused && (g_proc || replay::on)) { prepareRecording(true); procSetState(ScanningState_Record); g_mode = M_Record; g_recStart = clk::now(); }   // SDK: ContinueRecord unsupported; Resume starts a new scan, as Studio does
   else { notice(L"Recording could not start now (ArtecRec is busy). Press Record again in a moment."); logf("record request ignored in mode %d", m); return; }
-  g_dirty = true; view::follow = true; if (g_scans.empty() && view::dist > 400) view::dist = 320;   // start close enough to see the live surface
+  g_dirty = true; view::follow = true; if (view::dist > 450) view::dist = 320;   // start close enough to see the live surface (7 Nov: also with placed scans - an unplaced pass far from them had zoomed the view out, "the green box shrinks")
   // Keyboard focus goes to the 3D view: hiding a focused panel button leaves no focus window, and hotkeys (Ctrl+S…) were dead after a scan (found 2 Nov T6).
   if (S.hidePanel && !g_fullView) { g_savedPanel = g_showPanel; g_savedWs = g_showWs; g_savedLog = g_showLog; g_showPanel = g_showWs = g_showLog = false; g_fullView = true; layout(); } SetFocus(view::hwnd);
 }
@@ -53,7 +53,7 @@ static void doRecord() {
   beginRecordNow();
 }
 static void doPreview() { panel::readSettings(); int m = g_mode.load(); if (g_stuck) { notice(L"The scanner stopped answering. Save the project, then close and reopen ArtecRec."); return; }
-  if (m == M_Idle) { if (startProcedure(ScanningState_Preview)) { g_mode = M_Preview; view::follow = true; g_notice.clear(); } else { notice(L"Could not start the scanner. ArtecRec is looking for it again."); startReconnect(); } } else if (m == M_Paused) g_mode = M_Preview; }   // review B7
+  if (m == M_Idle) { if (startProcedure(ScanningState_Preview)) { g_mode = M_Preview; view::follow = true; if (view::dist > 450) view::dist = 320; g_notice.clear(); } else { notice(L"Could not start the scanner. ArtecRec is looking for it again."); startReconnect(); } } else if (m == M_Paused) g_mode = M_Preview; }   // review B7
 // review B5: a Stop pressed while an automatic restart is stopping cancels that restart
 static void doStop() { g_countdown = 0; int m = g_mode.load(); if (m == M_Record) g_recSecs += std::chrono::duration<double>(clk::now() - g_recStart).count(); if (m == M_Record || m == M_Preview || m == M_Paused) { g_userStop = true; stopProcedure(); } else if (m == M_Stopping) { g_userStop = true; if (g_autoRestart) notice(L"Stopped. The automatic restart after tracking loss was cancelled; the passes recorded so far are kept."); } }   /* third review: say so */
 // ---------------------------------------------------------------- replay benchmark (6 Nov): artecrec.exe --replay-bench <out.csv> <project.sproj>

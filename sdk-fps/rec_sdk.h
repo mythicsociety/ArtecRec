@@ -154,7 +154,7 @@ struct Settings {
   std::atomic<bool> distColor{true};   // read on the scanning and tidy-up threads (DeepSeek 2)
   bool autoAlign = false, hidePanel = false, recordTexture = true, flash = true, autoBright = true, audio = true;
   bool scanUsingAutoAlign = true;   // Settings > Scan > "Scan using auto-alignment" (default on)
-  bool fieldMode = false;           // 7 Nov (owner, museum day): record only; no clean-up, optimisation or auto-align after Stop - the passes are placed in the lab (Edit menu / Studio). Battery time is precious.
+  bool fieldMode = true;            // 7 Nov (owner, museum day): ON by default. Record only; no clean-up, optimisation or auto-align after Stop - the passes are placed in the lab (Edit menu / Studio). Battery time is precious.
   int shotBg = 0;                   // screenshot background: 0 white, 1 black
   std::atomic<float> nearMm{170.f}, farMm{330.f};
   float sens = 0.0f, texBright = 0.0f; int speed = 8; int texFreq = 0 /*0 auto*/, texEvery = 1; int delaySec = 0; bool limitFrames = false; int frameLimit = 2000;
