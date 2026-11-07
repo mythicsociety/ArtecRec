@@ -96,6 +96,12 @@ inline int rewriteScanNames(std::string& xml, const std::vector<std::wstring>& n
 // shape: a pass can slide along a flat surface and still lie on it. flatness = RMS distance (mm) of the window
 // points from their best-fit plane. 0.6 mm is deliberately loose (only near-featureless surfaces are refused) until
 // field data calibrate it: every join now logs its flatness.
+// 7 Nov (owner, museum day: "switching off auto align and doing multiple passes and then doing the align when we are
+// back in the lab is faster and more efficient. Field time is precious because of battery time"). Field mode: after
+// Stop a pass is kept as recorded (no frame clean-up, no surface optimisation, no refinement) and no auto-align is
+// queued; the live search still runs. The stub rule, autosave and Save are unchanged.
+inline bool processAfterStop(bool fieldMode) { return !fieldMode; }
+inline bool queueAutoAlignAfterStop(bool fieldMode, bool autoAlign, int newSinceAlign, bool newestPlaced, int visible) { return !fieldMode && autoAlign && newSinceAlign > 0 && !newestPlaced && visible >= 2; }
 // 7 Nov (museum day): the SDK's textured registration refuses frames whose photos differ in size (stored passes
 // 960x1280, live frames 480x640). A texture join between them can never succeed; the search goes straight to geometry.
 inline bool textureJoinPossible(int refW, int refH, int probeW, int probeH) { return refW > 0 && refH > 0 && refW == probeW && refH == probeH; }

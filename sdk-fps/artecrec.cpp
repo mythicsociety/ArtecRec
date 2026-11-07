@@ -17,7 +17,7 @@ static const wchar_t* APP = L"ArtecRec by Mythic Society";
 enum { IDM_NEW = 101, IDM_OPEN, IDM_SAVE, IDM_SAVEAS, IDM_EXIT, IDM_FIT, IDM_HOME, IDM_SETHOME, IDM_ORTHO, IDM_GRID, IDM_LIGHT, IDM_RANGE,
        IDM_RSOLID, IDM_RWIRE, IDM_RPOINTS, IDM_RWIRESOLID, IDM_RPOINTSSOLID, IDM_SMOOTH, IDM_FLAT, IDM_BF_SHOW, IDM_BF_CULL, IDM_BF_BLACK, IDM_BF_TRANS, IDM_COL_TEX, IDM_COL_SCAN, IDM_COL_SURF,
        IDM_VFRONT, IDM_VBACK, IDM_VLEFT, IDM_VRIGHT, IDM_VTOP, IDM_VBOTTOM, IDM_SHOT, IDM_CUR_MASS, IDM_CUR_ORIGIN,
-       IDM_SCANPANEL, IDM_WORKSPACE, IDM_LOG, IDM_AUDIO, IDM_AUTOALIGN, IDM_ZOOMCUR, IDM_SHOT_WHITE, IDM_SHOT_BLACK, IDM_ABOUT, IDM_ALIGNNOW, IDM_GLOBALREG, IDM_CANCELPROC };
+       IDM_SCANPANEL, IDM_WORKSPACE, IDM_LOG, IDM_AUDIO, IDM_AUTOALIGN, IDM_ZOOMCUR, IDM_SHOT_WHITE, IDM_SHOT_BLACK, IDM_ABOUT, IDM_ALIGNNOW, IDM_GLOBALREG, IDM_CANCELPROC, IDM_FIELDMODE };
 static HWND g_view, g_statusBar, g_logBox; static bool g_showPanel = true, g_showWs = true, g_showLog = true; static HMENU g_menu;
 static bool g_fitOnPost = false, g_capRestart = false, g_capWedged = false; static int g_capRestarts = 0; static bool g_reconnect = false, g_reconnectAdvised = false; static clk::time_point g_reconnectStart, g_reconnectLast; static bool g_autoRestart = false, g_fullView = false, g_savedPanel = true, g_savedWs = true, g_savedLog = true; static clk::time_point g_lastBeep;
 static void layout(); static clk::time_point g_cdStart; static bool g_firstScan = true;
@@ -276,7 +276,7 @@ static void updateStatus() {
   swprintf(b, 512, L"%.1f fps\r\n\r\nSurfaces recorded: %ld\r\nRecording time: %d:%02d\r\nRegistration failures: %ld   %s\r\n\r\n%s\r\n%s", (m == M_Idle) ? 0.0 : fps, shown, (int)secs / 60, (int)secs % 60, g_regFail.load(), g_alignMsg.get().c_str(), ms, nt.c_str());
   panel::setStatus(b); panel::enableForMode(m);
   const wchar_t* temp = !g_scanner ? (replay::on ? L"REPLAY - no scanner" : L"Scanner: not connected") : g_overheated.load() ? L"Scanner temperature: TOO HOT - let it cool" : L"Scanner temperature: normal";   // the SDK reports only overheated / back to normal, no degrees
-  wchar_t sb[720]; swprintf(sb, 720, L"  Build %hs %hs   |   %s   |   Free RAM: %.0f MB   |   Total memory in use: %.0f MB   |   %s%s%s%s", __DATE__, __TIME__, temp, freeGB() * 1024, wsGB() * 1024, m == M_Idle ? L"Ready" : ms, g_dirty ? L"   |   NOT SAVED" : L"", nt.empty() ? L"" : L"   |   ", nt.c_str()); SetWindowTextW(g_statusBar, sb);
+  wchar_t sb[800]; swprintf(sb, 800, L"  Build %hs %hs   |   %s%s   |   Free RAM: %.0f MB   |   Total memory in use: %.0f MB   |   %s%s%s%s", __DATE__, __TIME__, S.fieldMode ? L"FIELD MODE (record only)   |   " : L"", temp, freeGB() * 1024, wsGB() * 1024, m == M_Idle ? L"Ready" : ms, g_dirty ? L"   |   NOT SAVED" : L"", nt.empty() ? L"" : L"   |   ", nt.c_str()); SetWindowTextW(g_statusBar, sb);
   if (g_showLog) { std::wstring t; { std::lock_guard<std::mutex> l(g_logMx); size_t n = g_logLines.size(); for (size_t i = n > 5 ? n - 5 : 0; i < n; i++) { t += g_logLines[i]; t += L"\r\n"; } } static std::wstring lastT; if (t != lastT) { SetWindowTextW(g_logBox, t.c_str()); lastT = t; } }
 }
 // Panels (owner, 6 Nov): every panel collapses with a caret and is resized by dragging its edge; sizes are remembered.
@@ -314,7 +314,7 @@ static void dragSplitter(POINT p) { RECT r; GetClientRect(g_hwnd, &r); int W = r
 static void buildMenu() {
   g_menu = CreateMenu(); HMENU f = CreatePopupMenu(), e = CreatePopupMenu(), cur = CreatePopupMenu(), v = CreatePopupMenu(), sv = CreatePopupMenu(), rm = CreatePopupMenu(), bf = CreatePopupMenu(), cm = CreatePopupMenu(), w = CreatePopupMenu(), st = CreatePopupMenu(), sb = CreatePopupMenu(), h = CreatePopupMenu();
   AppendMenuW(f, MF_STRING, IDM_NEW, L"New project\tCtrl+N"); AppendMenuW(f, MF_STRING, IDM_OPEN, L"Open project…\tCtrl+O"); AppendMenuW(f, MF_STRING, IDM_SAVE, L"Save project\tCtrl+S"); AppendMenuW(f, MF_STRING, IDM_SAVEAS, L"Save project as…"); AppendMenuW(f, MF_SEPARATOR, 0, nullptr); AppendMenuW(f, MF_STRING, IDM_EXIT, L"Exit");
-  AppendMenuW(e, MF_STRING, IDM_ALIGNNOW, L"Auto-align visible scans now"); AppendMenuW(e, MF_STRING, IDM_GLOBALREG, L"Global registration of visible scans"); AppendMenuW(e, MF_STRING, IDM_CANCELPROC, L"Cancel processing (keep passes as recorded)"); AppendMenuW(e, MF_SEPARATOR, 0, nullptr); AppendMenuW(cur, MF_STRING, IDM_CUR_MASS, L"Set to mass center"); AppendMenuW(cur, MF_STRING, IDM_CUR_ORIGIN, L"Set to origin of axis grid"); AppendMenuW(e, MF_POPUP, (UINT_PTR)cur, L"Cursor (rotation center)");
+  AppendMenuW(e, MF_STRING, IDM_FIELDMODE, L"Field mode: record only, place the passes later (saves battery)"); AppendMenuW(e, MF_SEPARATOR, 0, nullptr); AppendMenuW(e, MF_STRING, IDM_ALIGNNOW, L"Auto-align visible scans now"); AppendMenuW(e, MF_STRING, IDM_GLOBALREG, L"Global registration of visible scans"); AppendMenuW(e, MF_STRING, IDM_CANCELPROC, L"Cancel processing (keep passes as recorded)"); AppendMenuW(e, MF_SEPARATOR, 0, nullptr); AppendMenuW(cur, MF_STRING, IDM_CUR_MASS, L"Set to mass center"); AppendMenuW(cur, MF_STRING, IDM_CUR_ORIGIN, L"Set to origin of axis grid"); AppendMenuW(e, MF_POPUP, (UINT_PTR)cur, L"Cursor (rotation center)");
   AppendMenuW(sv, MF_STRING, IDM_VFRONT, L"To front\tCtrl+Shift+1"); AppendMenuW(sv, MF_STRING, IDM_VBACK, L"To back\tCtrl+1"); AppendMenuW(sv, MF_STRING, IDM_VRIGHT, L"To right\tCtrl+Shift+3"); AppendMenuW(sv, MF_STRING, IDM_VLEFT, L"To left\tCtrl+3"); AppendMenuW(sv, MF_STRING, IDM_VTOP, L"To top\tCtrl+Shift+7"); AppendMenuW(sv, MF_STRING, IDM_VBOTTOM, L"To bottom\tCtrl+7");
   AppendMenuW(rm, MF_STRING, IDM_RSOLID, L"Render solid"); AppendMenuW(rm, MF_STRING, IDM_RWIRE, L"Render wireframe"); AppendMenuW(rm, MF_STRING, IDM_RPOINTS, L"Render points"); AppendMenuW(rm, MF_STRING, IDM_RWIRESOLID, L"Render wireframe over solid"); AppendMenuW(rm, MF_STRING, IDM_RPOINTSSOLID, L"Render points and solid"); AppendMenuW(rm, MF_SEPARATOR, 0, nullptr); AppendMenuW(rm, MF_STRING, IDM_SMOOTH, L"Smooth shading"); AppendMenuW(rm, MF_STRING, IDM_FLAT, L"Flat shading");
   AppendMenuW(bf, MF_STRING, IDM_BF_SHOW, L"Show"); AppendMenuW(bf, MF_STRING, IDM_BF_CULL, L"Cull"); AppendMenuW(bf, MF_STRING, IDM_BF_BLACK, L"Black"); AppendMenuW(bf, MF_STRING, IDM_BF_TRANS, L"Transparent");
@@ -333,7 +333,7 @@ static void syncMenu() {
   CheckMenuRadioItem(g_menu, IDM_RSOLID, IDM_RPOINTSSOLID, IDM_RSOLID + view::renderMode, MF_BYCOMMAND); CheckMenuRadioItem(g_menu, IDM_SMOOTH, IDM_FLAT, view::smooth ? IDM_SMOOTH : IDM_FLAT, MF_BYCOMMAND);
   CheckMenuRadioItem(g_menu, IDM_BF_SHOW, IDM_BF_TRANS, IDM_BF_SHOW + view::backface, MF_BYCOMMAND); CheckMenuRadioItem(g_menu, IDM_COL_TEX, IDM_COL_SURF, IDM_COL_TEX + view::colorMode, MF_BYCOMMAND);
   CheckMenuItem(g_menu, IDM_SCANPANEL, g_showPanel ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_WORKSPACE, g_showWs ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_LOG, g_showLog ? MF_CHECKED : 0);
-  CheckMenuItem(g_menu, IDM_AUDIO, S.audio ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_AUTOALIGN, S.scanUsingAutoAlign ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_ZOOMCUR, view::wheelToCursor ? MF_CHECKED : 0); CheckMenuRadioItem(g_menu, IDM_SHOT_WHITE, IDM_SHOT_BLACK, IDM_SHOT_WHITE + S.shotBg, MF_BYCOMMAND);
+  CheckMenuItem(g_menu, IDM_FIELDMODE, S.fieldMode ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_AUDIO, S.audio ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_AUTOALIGN, S.scanUsingAutoAlign ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_ZOOMCUR, view::wheelToCursor ? MF_CHECKED : 0); CheckMenuRadioItem(g_menu, IDM_SHOT_WHITE, IDM_SHOT_BLACK, IDM_SHOT_WHITE + S.shotBg, MF_BYCOMMAND);
 }
 static void command(int id) {
   switch (id) {
@@ -342,6 +342,8 @@ static void command(int id) {
     { g_mode = M_Busy; double secs = 0; int n = globalRegisterVisible(secs); g_mode = M_Idle; ws::refresh(); ws::showProps();
       if (n > 0) notice(L"Global registration done for " + std::to_wstring(n) + L" scan(s). Save the project."); else if (n == 0) notice(L"Show at least one scan in the Workspace."); else if (n == -1) notice(L"Global registration cancelled. The scans are unchanged."); else if (n == -3) notice(L"A pass is being cleaned (a few seconds). Try again in a moment."); else notice(L"Global registration failed. The scans are unchanged (see the log)."); } break;
   case IDM_CANCELPROC: { int n = cancelProcessing(); bool al = cancelAlign(); notice(n || al ? L"Cancelling... the passes are kept as recorded." : L"Nothing is being processed."); } break;
+  case IDM_FIELDMODE: S.fieldMode = !S.fieldMode; panel::saveIni(); logf("field mode %s", S.fieldMode ? "ON: passes are kept as recorded after Stop; place them in the lab" : "off: passes are cleaned, optimised and auto-aligned after Stop");
+    notice(S.fieldMode ? L"Field mode ON: passes are only recorded. Place them in the lab: Edit > Auto-align, then Global registration." : L"Field mode off: passes are processed after each Stop."); break;
   case IDM_ALIGNNOW: if (!logic::allowed(logic::A_AutoAlign, g_mode.load(), !postIdle(), g_stuck)) { notice(L"Wait until recording and processing have finished, then try again."); break; } { int vis = 0; for (auto& sc : g_scans) if (sc.visible) vis++; if (vis < 2) { notice(L"Show at least two scans in the Workspace to align them."); break; } } runAutoAlign(true); break;   // review D3
   case IDM_FIT: view::fit(); break; case IDM_HOME: view::home(); break; case IDM_SETHOME: view::setHome(); break; case IDM_ORTHO: view::ortho = !view::ortho; break; case IDM_GRID: view::grid = !view::grid; break; case IDM_LIGHT: view::lighting = !view::lighting; break; case IDM_RANGE: view::rangeMeter = !view::rangeMeter; break;
   case IDM_RSOLID: case IDM_RWIRE: case IDM_RPOINTS: case IDM_RWIRESOLID: case IDM_RPOINTSSOLID: view::renderMode = id - IDM_RSOLID; break; case IDM_SMOOTH: view::smooth = true; break; case IDM_FLAT: view::smooth = false; break;
@@ -454,7 +456,8 @@ static void jobDone(int gen) {
   // the user stopped: "added" was 0, so the unplaced pass from the restart chain was never auto-aligned. Look at the
   // newest scan, not at what this last recording added.
   bool newestPlaced = !g_scans.empty() && g_scans.back().placed;
-  if (S.autoAlign && g_newSinceAlign > 0 && !g_scans.empty() && !newestPlaced) { int vis = 0; for (auto& sc : g_scans) if (sc.visible) vis++; if (vis >= 2) { g_pendingAlign = true; logf("auto-align queued: the newest scan was not placed while scanning"); } }
+  { int vis = 0; for (auto& sc : g_scans) if (sc.visible) vis++; if (!g_scans.empty() && logic::queueAutoAlignAfterStop(S.fieldMode, S.autoAlign, g_newSinceAlign, newestPlaced, vis)) { g_pendingAlign = true; logf("auto-align queued: the newest scan was not placed while scanning"); }
+    else if (S.fieldMode && g_newSinceAlign > 0 && !newestPlaced) logf("field mode: the newest pass is not placed; no auto-align after Stop"); }
   g_newSinceAlign = 0;   // a Preview-and-Stop later does not re-run it
 }
 static LRESULT CALLBACK wndProc(HWND h, UINT u, WPARAM wp, LPARAM lp) {
@@ -546,7 +549,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
       break; } }
   if (!cmdl.empty()) { std::wstring p = cmdl; if (p.size() > 2 && p.front() == L'"') p = p.substr(1, p.size() - 2); openPath(p); }   // review A9: Busy while loading (no recording meanwhile)
   if (autosaveTest) { int n = 0; for (auto& sc : g_scans) { autosaveScan(sc.scan, sc.name); n++; } logf("autosave test: %d pass(es) queued", n); }
-  if (processTest) { int n = 0; for (auto& sc : g_scans) { startPostProcess(sc.scan, true); n++; } logf("process test: %d pass(es) being optimised", n); }
+  if (processTest) { int n = 0; for (auto& sc : g_scans) { startPostProcess(sc.scan, true, true); n++; } logf("process test: %d pass(es) being optimised", n); }
   if (replay::on && !g_scriptPath.empty()) { if (g_scans.empty() || !script::load(g_scriptPath)) { logf("replay script: no project with scans, or the script could not be read"); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); } }
   else if (replay::on) { if (g_scans.empty() || g_benchCsv.empty()) { logf("replay bench: no project with scans, or no output file"); PostMessageW(g_hwnd, WM_CLOSE, 0, 0); } else bench::begin(g_benchCsv); }   // review A9: Busy while loading (no recording meanwhile)
   MSG msg; while (GetMessageW(&msg, nullptr, 0, 0)) {

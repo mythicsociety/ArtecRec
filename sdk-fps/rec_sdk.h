@@ -154,6 +154,7 @@ struct Settings {
   std::atomic<bool> distColor{true};   // read on the scanning and tidy-up threads (DeepSeek 2)
   bool autoAlign = false, hidePanel = false, recordTexture = true, flash = true, autoBright = true, audio = true;
   bool scanUsingAutoAlign = true;   // Settings > Scan > "Scan using auto-alignment" (default on)
+  bool fieldMode = false;           // 7 Nov (owner, museum day): record only; no clean-up, optimisation or auto-align after Stop - the passes are placed in the lab (Edit menu / Studio). Battery time is precious.
   int shotBg = 0;                   // screenshot background: 0 white, 1 black
   std::atomic<float> nearMm{170.f}, farMm{330.f};
   float sens = 0.0f, texBright = 0.0f; int speed = 8; int texFreq = 0 /*0 auto*/, texEvery = 1; int delaySec = 0; bool limitFrames = false; int frameLimit = 2000;
@@ -757,7 +758,7 @@ static std::wstring nextScanName() {
   for (;;) { wchar_t b[128]; swprintf(b, 128, L"%s %d", base.c_str(), n); bool used = false; for (auto& nm : names) if (nm == b) used = true; if (!used) return b; n++; }
 }
 static std::wstring uniqueName(const std::wstring& base) { std::vector<std::wstring> names; { std::lock_guard<std::mutex> l(g_scanMx); for (auto& s : g_scans) names.push_back(s.name); } std::wstring n = base; int k = 2; for (;;) { bool used = false; for (auto& nm : names) if (nm == n) used = true; if (!used) return n; wchar_t b[160]; swprintf(b, 160, L"%s (%d)", base.c_str(), k++); n = b; } }
-static void startPostProcess(IScan* s, bool optimise); static bool postIdle();
+static void startPostProcess(IScan* s, bool optimise = true, bool fresh = false); static bool postIdle();
 static void duplicateScan(int i) {   // Studio: Duplicate → "Copy of <name>"
   if (i < 0 || i >= (int)g_scans.size() || !g_scans[i].scan) return; /* the Workspace allows this only when idle (editOk) */ IScan* c = nullptr; createSimilarScan(&c, g_scans[i].scan); if (!c) return; cloneScan(c, g_scans[i].scan);
   ScanRec r; r.scan = c; r.group = g_scans[i].group; r.keyFrames = g_scans[i].keyFrames; r.maxErr = g_scans[i].maxErr; memcpy(r.color, g_scans[i].color, sizeof r.color); setScanName(r, uniqueName(L"Copy of " + g_scans[i].name)); countScanStats(r); buildScanDisplay(r);
@@ -871,7 +872,7 @@ static std::atomic<int> g_cleaningNow{0};   // passes whose frames are being cle
 // is held while one pass is cleaned and for the whole of a save / global registration, so the two never overlap.
 static std::mutex g_frameEditMx;
 static std::mutex g_itemsMx; static std::vector<std::shared_ptr<PostItem>> g_items; static std::atomic<int> g_lostPosts{0};   // results that could not be delivered
-static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> item) {   // s carries one reference for this thread; g_postBusy was raised by startPostProcess
+static void postProcessScan(IScan* s, bool optimise, bool fresh, std::shared_ptr<PostItem> item) {   // s carries one reference for this thread; g_postBusy was raised by startPostProcess; fresh = a pass just recorded (autosaved when done)
   g_postGate.enter(); { std::lock_guard<std::mutex> l(item->m); if (item->abandoned) { g_postGate.leave(); s->release(); return; } item->gated = true; item->t0 = clk::now(); } auto t0 = clk::now(); int nf = s->getSize(); IScan* r = nullptr;
   if (optimise && nf >= 1) {
     // publish first, then let a search already in flight finish (it may be reading this scan); if it does not finish in
@@ -908,7 +909,8 @@ static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> i
         if (v.ok) { r->setScanTransformation(nT); logf("pass refinement: moved %.1f mm, turned %.2f deg, %.0f%% of points within 2 mm (residual %.2f mm), %.1f s", moved, rot, share * 100, rms, secs); }
         else { logf("pass refinement rejected: %s (moved %.1f mm, turned %.2f deg, %.0f%% matched); the pass keeps its live position", v.why, moved, rot, share * 100); g_alignMsg = std::wstring(L"a join could not be tightened - check it on screen"); } }
       else logf("pass refinement: no overlap found with the other scans (%.1f s)", std::chrono::duration<double>(clk::now() - tr).count()); } }
-  PostResult* pr = new PostResult(); pr->fresh = optimise; pr->src = s; pr->res = r ? r : s; ScanRec tmp; tmp.scan = pr->res; buildScanDisplay(tmp); pr->disp = std::move(tmp.disp); memcpy(pr->texAvg, tmp.texAvg, sizeof pr->texAvg); pr->hasTexAvg = tmp.hasTexAvg; tmp.scan = nullptr;
+  if (fresh && !optimise) logf("field mode: pass of %d frames kept as recorded (no clean-up, optimisation or auto-align); place the passes in the lab (Edit menu) or in Studio", nf);
+  PostResult* pr = new PostResult(); pr->fresh = fresh; pr->src = s; pr->res = r ? r : s; ScanRec tmp; tmp.scan = pr->res; buildScanDisplay(tmp); pr->disp = std::move(tmp.disp); memcpy(pr->texAvg, tmp.texAvg, sizeof pr->texAvg); pr->hasTexAvg = tmp.hasTexAvg; tmp.scan = nullptr;
   pr->ref = nf >= 3 ? buildRef(pr->res, 40) : nullptr;
   if (g_featSearch && nf >= 3) pr->feats = buildFeats(pr->res, 40);
   { std::lock_guard<std::mutex> l(item->m); if (item->abandoned) { if (pr->ref) pr->ref->release(); if (pr->res && pr->res != pr->src) pr->res->release(); pr->src->release(); delete pr; return; } item->done = true; g_postGate.leave(); }
@@ -918,7 +920,7 @@ static void postProcessScan(IScan* s, bool optimise, std::shared_ptr<PostItem> i
 // Review C3/A3/E3: the busy count is raised here, on the UI thread, before the thread exists, and lowered by
 // onPostDone on the UI thread after the result is swapped in. postIdle() is therefore exact: no queued result exists.
 // Threads are detached: each holds its own references, and nothing waits for them at exit (review B6).
-static void startPostProcess(IScan* s, bool optimise = true) { s->addRef(); g_postBusy++; g_optimising = true; auto it = std::make_shared<PostItem>(); it->s = s; it->t0 = clk::now(); it->optimise = optimise; { std::lock_guard<std::mutex> l(g_itemsMx); g_items.push_back(it); } std::thread(postProcessScan, s, optimise, it).detach(); }
+static void startPostProcess(IScan* s, bool optimise, bool fresh) { s->addRef(); g_postBusy++; g_optimising = true; auto it = std::make_shared<PostItem>(); it->s = s; it->t0 = clk::now(); it->optimise = optimise; { std::lock_guard<std::mutex> l(g_itemsMx); g_items.push_back(it); } std::thread(postProcessScan, s, optimise, fresh, it).detach(); }
 // Cancel processing (Edit menu, Close, Open, New): every running tidy-up stops; its scan stays as recorded.
 static int cancelProcessing() { int n = 0; std::lock_guard<std::mutex> l(g_itemsMx); for (auto& p : g_items) { std::lock_guard<std::mutex> lk(p->m); if (!p->done && !p->abandoned && !p->cancel.load()) { p->cancel = true; p->cancelAt = clk::now(); n++; } } if (n) logf("processing cancelled by the user (%d pass(es)); kept as recorded", n); return n; }
 // UI timer: a tidy-up asked to cancel that has not returned after logic::giveUpAfterCancel is given up. Returns true if one was.
@@ -984,7 +986,7 @@ static int onJobDone() {
   // review A6: say so when a recording ended in an error or left nothing (only the log knew before)
   if (g_jobEc.load() != ErrorCode_OK && !added && g_frames.load() > 0) notice(L"The last recording ended with a scanner error and nothing could be kept. Check the scanner and record again.");
   { std::lock_guard<std::mutex> l(g_mx); g_liveAcc.clear(); g_live = FrameMesh(); g_hist.clear(); g_histKey.clear(); g_histKeys.clear(); }
-  for (int i = (int)g_scans.size() - added; i < (int)g_scans.size(); i++) startPostProcess(g_scans[i].scan);   // fine registration + display build off the UI thread
+  for (int i = (int)g_scans.size() - added; i < (int)g_scans.size(); i++) startPostProcess(g_scans[i].scan, logic::processAfterStop(S.fieldMode), true);   // fine registration + display build off the UI thread (field mode: display + search reference only)
   g_mode = M_Idle; return added;
 }
 // Rebuild g_master from g_scans (after delete / reorder / align).

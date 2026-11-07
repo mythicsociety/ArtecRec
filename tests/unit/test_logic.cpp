@@ -231,6 +231,16 @@ TEST(join_share_and_median_limits, "D1") {
   CHECK(!acceptJoin(0.9f, 2.51f, false, 5).ok); CHECK(acceptJoin(0.9f, 2.5f, false, 5).ok); CHECK(!acceptJoin(0.0f, 9.f, false, 5).ok);
   CHECK(strlen(acceptJoin(0.1f, 0.5f, false, 5).why) > 0); CHECK(strlen(acceptJoin(0.9f, 0.5f, false, 5).why) == 0);
 }
+TEST(field_mode_records_only, "field") {
+  // 7 Nov museum day (owner): no processing after Stop in the field; the passes are placed in the lab
+  CHECK(processAfterStop(false)); CHECK(!processAfterStop(true));
+  CHECK(queueAutoAlignAfterStop(false, true, 1, false, 2));     // normal: an unplaced new pass with 2 visible scans is aligned
+  CHECK(!queueAutoAlignAfterStop(true, true, 1, false, 2));     // field mode: never
+  CHECK(!queueAutoAlignAfterStop(false, false, 1, false, 2));   // panel option off
+  CHECK(!queueAutoAlignAfterStop(false, true, 0, false, 2));    // nothing new since the last align
+  CHECK(!queueAutoAlignAfterStop(false, true, 1, true, 2));     // the newest pass was placed live
+  CHECK(!queueAutoAlignAfterStop(false, true, 1, false, 1));    // only one scan visible
+}
 TEST(texture_join_skipped_when_photo_sizes_differ, "D1") {
   // 7 Nov museum day: stored passes 960x1280, live frames 480x640 -> the SDK refuses them; go straight to geometry
   CHECK(!textureJoinPossible(960, 1280, 480, 640)); CHECK(!textureJoinPossible(480, 640, 960, 1280));

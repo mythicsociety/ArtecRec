@@ -119,7 +119,7 @@ static void saveIni() {
   if (!iniLoaded) return; std::wstring f = iniPath(); auto wi = [&](const wchar_t* k, int v) { wchar_t b[32]; swprintf(b, 32, L"%d", v); WritePrivateProfileStringW(L"scan", k, b, f.c_str()); };
   wi(L"iniVersion", 2); wi(L"tracking", S.tracking); wi(L"distColor", S.distColor); wi(L"autoAlign", S.autoAlign); wi(L"hidePanel", S.hidePanel); wi(L"speed", S.speed); wi(L"near", (int)S.nearMm.load()); wi(L"far", (int)S.farMm.load());
   wi(L"sens", (int)(S.sens * 100 + 0.5f)); wi(L"texBright", (int)(S.texBright * 100 + 0.5f)); wi(L"autoBright", S.autoBright); wi(L"recordTexture", S.recordTexture); wi(L"flash", S.flash); wi(L"texFreq", S.texFreq); wi(L"texEvery", S.texEvery);
-  wi(L"delay", S.delaySec); wi(L"limitFrames", S.limitFrames); wi(L"frameLimit", S.frameLimit); wi(L"audio", S.audio); wi(L"scanUsingAutoAlign", S.scanUsingAutoAlign); wi(L"shotBg", S.shotBg); wi(L"advOpen", advOpen);
+  wi(L"delay", S.delaySec); wi(L"limitFrames", S.limitFrames); wi(L"frameLimit", S.frameLimit); wi(L"audio", S.audio); wi(L"scanUsingAutoAlign", S.scanUsingAutoAlign); wi(L"fieldMode", S.fieldMode); wi(L"shotBg", S.shotBg); wi(L"advOpen", advOpen);
   if (!g_projPath.empty()) WritePrivateProfileStringW(L"scan", L"lastProject", g_projPath.c_str(), f.c_str());   // DeepSeek 4: checked at the next start
   BOOL ok = WritePrivateProfileStringW(L"scan", L"scanName", S.scanName.c_str(), f.c_str());
   WritePrivateProfileStringW(nullptr, nullptr, nullptr, f.c_str());   // flush Windows' ini cache now; otherwise a killed process loses the settings (found 2 Nov)
@@ -133,7 +133,7 @@ static void loadIni() {
   chk(cNoTex, !ri(L"recordTexture", 1)); chk(cNoFlash, !ri(L"flash", 1)); int tf = ri(L"texFreq", 0); chk(rFreqAuto, tf == 0); chk(rFreqN, tf == 1); wchar_t b[32];
   swprintf(b, 32, L"%d", ri(L"texEvery", 1)); SetWindowTextW(eFreqN, b); swprintf(b, 32, L"%d", ri(L"delay", 0)); SetWindowTextW(eDelay, b); chk(cLimit, ri(L"limitFrames", 0)); swprintf(b, 32, L"%d", ri(L"frameLimit", 2000)); SetWindowTextW(eLimit, b);
   wchar_t nm[128] = L""; GetPrivateProfileStringW(L"scan", L"scanName", L"", nm, 128, f.c_str()); SetWindowTextW(eName, nm);
-  S.audio = ri(L"audio", 1); S.scanUsingAutoAlign = ri(L"scanUsingAutoAlign", 1); S.shotBg = ri(L"shotBg", 0); bool adv = ri(L"advOpen", 1); if (adv != advOpen) toggleAdvanced();
+  S.audio = ri(L"audio", 1); S.scanUsingAutoAlign = ri(L"scanUsingAutoAlign", 1); S.fieldMode = ri(L"fieldMode", 0) != 0; S.shotBg = ri(L"shotBg", 0); bool adv = ri(L"advOpen", 1); if (adv != advOpen) toggleAdvanced();
   readSettings(); iniLoaded = true; logf("settings loaded from %ls (autoAlign %d, tracking %d, speed %d)", f.c_str(), (int)S.autoAlign, S.tracking, S.speed);
 }
 static void toggleAdvanced() { advOpen = !advOpen; SetWindowTextW(bAdv, advOpen ? L"Advanced  —" : L"Advanced  +"); layout(); InvalidateRect(hwnd, nullptr, TRUE); }
