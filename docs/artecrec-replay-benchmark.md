@@ -49,6 +49,17 @@ Reading: with little overlap the join or auto-align lands 4-8 mm off while still
 rule stays: resume over surface already scanned, with generous overlap. Live joins from a mid-pass start are rare
 (1 of 7 tried): the first frames of a resume are often over fresh surface.
 
+## A slid join, and a second opinion that catches it (7 Nov 08:30)
+
+Kalya Byrava, pass 1 (102 frames, overlap start, reference sound: 95 % on the other passes, 0.01 mm): the live
+geometry join reported 100 % within 6 mm, median 0.6 mm; the refinement 100 % within 2 mm, residual 0.08 mm. The pass
+is 10 mm from its true place (placement fit on the model 50 % vs 91 % saved). Reproduced 3 of 3 runs. A repeating
+relief lets a geometry join slide while every internal check reads "perfect".
+
+Second opinion = the SDK's auto-align of the new pass against the others from scratch, after Stop: 0.3 mm from the
+saved position, 9.9 mm from the live placement. A "live join vs auto-align disagree by > 3 mm" check would have caught
+this one. Columns `secondErrMm`, `secondVsLiveMm` now record it for every live-joined pass; the corpus decides the rule.
+
 ## Two things the replay cannot judge
 
 - **Re-optimisation of the frames.** The replayed frames are already registered by Studio. ArtecRec's surface
