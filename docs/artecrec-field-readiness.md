@@ -142,3 +142,6 @@ replay field-day 9/9, field-mode-check 7/7, loss-check 4/4 (+1 script mistake fi
 D:\ArtecRecrtecrec.exe.prev. Madhusudhan had set autoAlign=0 and scanUsingAutoAlign=0 himself; left as they were.
 Stone timings (build 06:55): stone 1 (low-medium) 16 min scanning, 19 min to placed, 7 passes; stone 2 (small-low)
 ~21 min, 13 scans, losses every 10-15 s at the stone edge over a blue tarp (photo), after-Stop auto-align 15-184 s.
+Reruns alone on the installed build: loss-check 5/5; field-mode-check 7/7 after the field-day script was given a real
+overlap for pass 2 (150 frames; the old 50-frame resume never joined in replay, its one FOUND came from the loss restart).
+First field proof 10:44:51: tracking lost, back after 2.1 s, same scan continued (stone 3, Field mode, 4 passes kept as recorded).

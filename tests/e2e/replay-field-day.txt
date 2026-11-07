@@ -11,21 +11,21 @@ wait fed 300
 stop
 settle
 expect added 1
-log pass 2: resumed over the scanned surface (scan 2 from frame 250), it should join live
-record 2 250 480
-wait fed 220
+log pass 2: resumed over the scanned surface (scan 2 from frame 150: 150 frames of overlap, ~26 s), it should join live
+record 2 150 400
+wait fed 240
 stop
 settle
 expect added 2
 expect still 4 0.05
-log pass 3: another part of the stone (scan 1), tracking lost after 100 frames, then the automatic restart (a loss makes two scans)
+log pass 3: another part of the stone (scan 1), tracking lost after 100 frames; the scan stays open and continues (7 Nov: a loss no longer makes a second scan)
 record 1 0 214
 wait fed 100
 lose 15
 wait secs 20
 stop
 settle
-expect added 4
+expect added 3
 expect still 4 0.05
 expect still 5 0.05
 log done: the project holds the three new passes; save it from the File menu if you like
