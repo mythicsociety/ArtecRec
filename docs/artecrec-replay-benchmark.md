@@ -28,14 +28,26 @@ NO_OVERLAP_SAVED when the pass overlaps nothing as saved, `+MODEL_OK/OFF` from t
   (registered, aligned scans in `Scans`) plus the fused model in `Exports`. These are the corpus. Copied with
   `tests/replay/finished-copy.ps1` to `D:\ArtecReplay\finished\<name>\` (project file, Scans, Model\<smallest stl/ply>).
 
-## Results so far (mid-pass resume)
+## Results so far (mid-pass resume, 7 Nov 05:40-06:25, 5 finished projects)
 
-| Project | Pass | Frames | Live join | Final error | On the model | Anchors moved | Verdict |
+| Project | Pass | Frames | Live join | Final error | On the model | Saved pos. check | Verdict |
 |---|---|---|---|---|---|---|---|
-| Chikkajala Garudakamba | 1 | 726 | no (1 try) | 1.3 mm | 96 % | 0 | ALIGNED_OK + MODEL_OK |
-| Chikkajala Garudakamba | 2 | 322 | yes, try 1, 3.3 s | 3.1 mm | 99 % | 0 | JOINED_OK + MODEL_OK |
+| Chikkajala Garudakamba | 1 | 726 | no (1 try) | 1.3 mm | 96 % | ok | ALIGNED_OK + MODEL_OK |
+| Chikkajala Garudakamba | 2 | 322 | yes, try 1, 3.3 s | 3.1 mm | 99 % | ok | JOINED_OK + MODEL_OK |
+| Chikkajala temple basement | 1 | 458 | yes, try 1, 21 s | 4.4 mm | 74 % (saved: 95 %) | overlap 11 % | JOINED_OK?TRUTH + MODEL_OFF |
+| Chikkajala temple basement | 2 | 543 | no | 7.9 mm | 67 % (saved: 98 %) | overlap 15 % | ALIGNED_WRONG?TRUTH + MODEL_OFF |
+| Aradeshamahalli Dv41 | 1 | 724 | - | - | - | no overlap as saved | NO_OVERLAP_SAVED |
+| Maranayakanahalli 2 | 1 | 214 | no | 2.3 mm | 98 % | ok | ALIGNED_OK + MODEL_OK |
+| Maranayakanahalli 2 | 2 | 608 | no | 1.8 mm | 100 % | ok | ALIGNED_OK + MODEL_OK |
+| Maranayakanahalli 2 | 3 | 112 | no | 1.1 mm | 100 % | ok | ALIGNED_OK + MODEL_OK |
+| Aradeshanahalli Dv43 | 3 | 1120 | - | - | - | no overlap as saved | NO_OVERLAP_SAVED |
 
-Model frame check: 92 % of the saved passes within 2 mm of the model.
+Counts: 5 placed correctly (1 live join, 4 auto-align), 2 a few mm off where the pass overlaps the others by only
+11-15 %, 2 passes that overlap nothing as saved. No anchor moved. Model frame check: 92 % (Garudakamba).
+
+Reading: with little overlap the join or auto-align lands 4-8 mm off while still looking plausible on screen. Field
+rule stays: resume over surface already scanned, with generous overlap. Live joins from a mid-pass start are rare
+(1 of 7 tried): the first frames of a resume are often over fresh surface.
 
 ## How to run
 

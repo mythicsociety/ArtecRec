@@ -1,0 +1,32 @@
+# Replay script: a field day on one stone, as the team would see it on screen.
+# Run: artecrec.exe --replay-script C:\Artec\tests\e2e\replay-field-day.txt <finished project with 3 scans>
+# Written for Maranaykanahalli2viragallu (scan 1: 214 frames, scan 2: 608, scan 3: 112). The project's own scans are
+# hidden and serve only as the frame source; the Workspace fills with the new passes.
+hide 1
+hide 2
+hide 3
+log pass 1: the first pass of the stone (scan 2, frames 0-300)
+record 2 0 300
+wait fed 300
+stop
+settle
+expect added 1
+log pass 2: resumed over the scanned surface (scan 2 from frame 250), it should join live
+record 2 250 480
+wait fed 220
+stop
+settle
+expect added 2
+expect still 4 0.05
+log pass 3: another part of the stone (scan 1), tracking lost after 100 frames, then the automatic restart
+record 1 0 214
+wait fed 100
+lose 15
+wait secs 20
+stop
+settle
+expect added 3
+expect still 4 0.05
+expect still 5 0.05
+log done: the project holds the three new passes; save it from the File menu if you like
+end
