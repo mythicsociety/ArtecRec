@@ -158,10 +158,10 @@ static void step() {
 //   end                          write the summary and close ArtecRec
 namespace script {
 static bool active = false; static std::vector<std::vector<std::wstring>> cmds; static size_t pc = 0; static int fails = 0, checks = 0; static clk::time_point tw; static bool waiting = false; static int waitFed = 0; static double waitSecs = 0; static int waitKind = 0;
-static std::vector<Matrix4x4D> start; static int lastSrc = -1;
+static std::vector<Matrix4x4D> start; static size_t startCount = 0; static int lastSrc = -1;
 static bool load(const std::wstring& path) { FILE* f = _wfopen(path.c_str(), L"r, ccs=UTF-8"); if (!f) return false; wchar_t line[512]; cmds.clear();
   while (fgetws(line, 512, f)) { std::wstring l = line; while (!l.empty() && (l.back() == L'\n' || l.back() == L'\r' || l.back() == L' ')) l.pop_back(); if (l.empty() || l[0] == L'#') continue; std::vector<std::wstring> t; size_t p = 0; while (p < l.size()) { size_t q = l.find(L' ', p); if (q == std::wstring::npos) q = l.size(); if (q > p) t.push_back(l.substr(p, q - p)); p = q + 1; } if (!t.empty()) cmds.push_back(t); }
-  fclose(f); for (auto& r : g_scans) start.push_back(r.scan ? r.scan->getScanTransformation() : Matrix4x4D()); active = true; pc = 0; logf("replay script: %d command(s), %d scan(s)", (int)cmds.size(), (int)g_scans.size()); return true; }
+  fclose(f); start.clear(); for (auto& r : g_scans) start.push_back(r.scan ? r.scan->getScanTransformation() : Matrix4x4D()); startCount = g_scans.size(); active = true; pc = 0; logf("replay script: %d command(s), %d scan(s)", (int)cmds.size(), (int)g_scans.size()); return true; }
 static void check(bool ok, const char* what) { checks++; if (!ok) { fails++; logf("SCRIPT FAIL: %s", what); } else logf("script ok: %s", what); }
 static int num(const std::wstring& w) { return _wtoi(w.c_str()); }
 static void step() {
@@ -179,7 +179,7 @@ static void step() {
   else if (op == L"settle") { waiting = true; waitKind = 4; }
   else if (op == L"expect" && c.size() >= 3) {
     if (c[1] == L"scans") { snprintf(b, sizeof b, "expect scans %d (have %d)", num(c[2]), (int)g_scans.size()); check((int)g_scans.size() == num(c[2]), b); }
-    else if (c[1] == L"added") { int have = (int)g_scans.size() - (int)start.size(); snprintf(b, sizeof b, "expect %d scan(s) added since the start (have %d)", num(c[2]), have); check(have == num(c[2]), b); }
+    else if (c[1] == L"added") { int have = (int)g_scans.size() - (int)startCount; snprintf(b, sizeof b, "expect %d scan(s) added since the start (have %d)", num(c[2]), have); check(have == num(c[2]), b); }
     else if (c[1] == L"placed" && c.size() >= 4) { ScanRec* r = scanAt(num(c[2])); snprintf(b, sizeof b, "expect placed %d = %d (is %d)", num(c[2]), num(c[3]), r ? (int)r->placed : -1); check(r && (int)r->placed == num(c[3]), b); }
     else if (c[1] == L"last" && c.size() >= 4) { double e = -1; if (!g_scans.empty() && lastSrc >= 0 && lastSrc < (int)g_scans.size() && g_scans.back().scan && g_scans[lastSrc].scan) { bench::truth = g_scans[lastSrc].scan->getScanTransformation(); e = bench::errOf(g_scans[lastSrc].scan, g_scans.back().scan->getScanTransformation()); } snprintf(b, sizeof b, "expect last near %.1f mm (is %.2f mm)", _wtof(c[3].c_str()), e); check(e >= 0 && e <= _wtof(c[3].c_str()), b); }
     else if (c[1] == L"still" && c.size() >= 4) { int n = num(c[2]); double d = -1; if (n >= 1 && n <= (int)start.size() && g_scans[n - 1].scan) d = bench::dist(g_scans[n - 1].scan->getScanTransformation().m, start[n - 1].m); snprintf(b, sizeof b, "expect scan %d still within %.2f mm (moved %.2f mm)", n, _wtof(c[3].c_str()), d); check(d >= 0 && d <= _wtof(c[3].c_str()), b); } }
