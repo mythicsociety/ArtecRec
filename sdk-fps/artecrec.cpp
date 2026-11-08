@@ -18,6 +18,7 @@ enum { IDM_NEW = 101, IDM_OPEN, IDM_SAVE, IDM_SAVEAS, IDM_EXIT, IDM_FIT, IDM_HOM
        IDM_RSOLID, IDM_RWIRE, IDM_RPOINTS, IDM_RWIRESOLID, IDM_RPOINTSSOLID, IDM_SMOOTH, IDM_FLAT, IDM_BF_SHOW, IDM_BF_CULL, IDM_BF_BLACK, IDM_BF_TRANS, IDM_COL_TEX, IDM_COL_SCAN, IDM_COL_SURF,
        IDM_VFRONT, IDM_VBACK, IDM_VLEFT, IDM_VRIGHT, IDM_VTOP, IDM_VBOTTOM, IDM_SHOT, IDM_CUR_MASS, IDM_CUR_ORIGIN,
        IDM_SCANPANEL, IDM_WORKSPACE, IDM_LOG, IDM_AUDIO, IDM_AUTOALIGN, IDM_ZOOMCUR, IDM_SHOT_WHITE, IDM_SHOT_BLACK, IDM_ABOUT, IDM_ALIGNNOW, IDM_GLOBALREG, IDM_CANCELPROC, IDM_FIELDMODE, IDM_DAYLIGHT };
+static bool g_labMode = false;   // --lab: Edit menu and processing after Stop (tests, benchmark); the field build has neither
 static HWND g_view, g_statusBar, g_logBox; static bool g_showPanel = true, g_showWs = true, g_showLog = true; static HMENU g_menu;
 static bool g_fitOnPost = false, g_capRestart = false, g_capWedged = false; static int g_capRestarts = 0; static bool g_reconnect = false, g_reconnectAdvised = false; static clk::time_point g_reconnectStart, g_reconnectLast; static bool g_autoRestart = false, g_fullView = false, g_savedPanel = true, g_savedWs = true, g_savedLog = true; static clk::time_point g_lastBeep;
 static void layout(); static clk::time_point g_cdStart; static bool g_firstScan = true;
@@ -276,7 +277,7 @@ static void updateStatus() {
   swprintf(b, 512, L"%.1f fps\r\n\r\nSurfaces recorded: %ld\r\nRecording time: %d:%02d\r\nRegistration failures: %ld   %s\r\n\r\n%s\r\n%s", (m == M_Idle) ? 0.0 : fps, shown, (int)secs / 60, (int)secs % 60, g_regFail.load(), g_alignMsg.get().c_str(), ms, nt.c_str());
   panel::setStatus(b); panel::enableForMode(m);
   const wchar_t* temp = !g_scanner ? (replay::on ? L"REPLAY - no scanner" : L"Scanner: not connected") : g_overheated.load() ? L"Scanner temperature: TOO HOT - let it cool" : L"Scanner temperature: normal";   // the SDK reports only overheated / back to normal, no degrees
-  wchar_t sb[800]; swprintf(sb, 800, L"  Build %hs %hs   |   %s%s   |   Free RAM: %.0f MB   |   Total memory in use: %.0f MB   |   %s%s%s%s", __DATE__, __TIME__, S.fieldMode ? L"FIELD MODE (record only)   |   " : L"", temp, freeGB() * 1024, wsGB() * 1024, m == M_Idle ? L"Ready" : ms, g_dirty ? L"   |   NOT SAVED" : L"", nt.empty() ? L"" : L"   |   ", nt.c_str()); SetWindowTextW(g_statusBar, sb);
+  wchar_t sb[800]; swprintf(sb, 800, L"  Build %hs %hs   |   %s%s   |   Free RAM: %.0f MB   |   Total memory in use: %.0f MB   |   %s%s%s%s", __DATE__, __TIME__, g_labMode ? L"LAB MODE   |   " : L"", temp, freeGB() * 1024, wsGB() * 1024, m == M_Idle ? L"Ready" : ms, g_dirty ? L"   |   NOT SAVED" : L"", nt.empty() ? L"" : L"   |   ", nt.c_str()); SetWindowTextW(g_statusBar, sb);
   if (g_showLog) { std::wstring t; { std::lock_guard<std::mutex> l(g_logMx); size_t n = g_logLines.size(); for (size_t i = n > 5 ? n - 5 : 0; i < n; i++) { t += g_logLines[i]; t += L"\r\n"; } } static std::wstring lastT; if (t != lastT) { SetWindowTextW(g_logBox, t.c_str()); lastT = t; } }
 }
 // Panels (owner, 6 Nov): every panel collapses with a caret and is resized by dragging its edge; sizes are remembered.
@@ -314,7 +315,8 @@ static void dragSplitter(POINT p) { RECT r; GetClientRect(g_hwnd, &r); int W = r
 static void buildMenu() {
   g_menu = CreateMenu(); HMENU f = CreatePopupMenu(), e = CreatePopupMenu(), cur = CreatePopupMenu(), v = CreatePopupMenu(), sv = CreatePopupMenu(), rm = CreatePopupMenu(), bf = CreatePopupMenu(), cm = CreatePopupMenu(), w = CreatePopupMenu(), st = CreatePopupMenu(), sb = CreatePopupMenu(), h = CreatePopupMenu();
   AppendMenuW(f, MF_STRING, IDM_NEW, L"New project\tCtrl+N"); AppendMenuW(f, MF_STRING, IDM_OPEN, L"Open project…\tCtrl+O"); AppendMenuW(f, MF_STRING, IDM_SAVE, L"Save project\tCtrl+S"); AppendMenuW(f, MF_STRING, IDM_SAVEAS, L"Save project as…"); AppendMenuW(f, MF_SEPARATOR, 0, nullptr); AppendMenuW(f, MF_STRING, IDM_EXIT, L"Exit");
-  AppendMenuW(e, MF_STRING, IDM_FIELDMODE, L"Field mode: record only, place the passes later (saves battery)"); AppendMenuW(e, MF_SEPARATOR, 0, nullptr); AppendMenuW(e, MF_STRING, IDM_ALIGNNOW, L"Auto-align visible scans now"); AppendMenuW(e, MF_STRING, IDM_GLOBALREG, L"Global registration of visible scans"); AppendMenuW(e, MF_STRING, IDM_CANCELPROC, L"Cancel processing (keep passes as recorded)"); AppendMenuW(e, MF_SEPARATOR, 0, nullptr); AppendMenuW(cur, MF_STRING, IDM_CUR_MASS, L"Set to mass center"); AppendMenuW(cur, MF_STRING, IDM_CUR_ORIGIN, L"Set to origin of axis grid"); AppendMenuW(e, MF_POPUP, (UINT_PTR)cur, L"Cursor (rotation center)");
+  if (g_labMode) { AppendMenuW(e, MF_STRING, IDM_FIELDMODE, L"Field mode: record only, place the passes later"); AppendMenuW(e, MF_SEPARATOR, 0, nullptr); AppendMenuW(e, MF_STRING, IDM_ALIGNNOW, L"Auto-align visible scans now"); AppendMenuW(e, MF_STRING, IDM_GLOBALREG, L"Global registration of visible scans"); AppendMenuW(e, MF_STRING, IDM_CANCELPROC, L"Cancel processing (keep passes as recorded)"); }
+  AppendMenuW(cur, MF_STRING, IDM_CUR_MASS, L"Set to mass center"); AppendMenuW(cur, MF_STRING, IDM_CUR_ORIGIN, L"Set to origin of axis grid");
   AppendMenuW(sv, MF_STRING, IDM_VFRONT, L"To front\tCtrl+Shift+1"); AppendMenuW(sv, MF_STRING, IDM_VBACK, L"To back\tCtrl+1"); AppendMenuW(sv, MF_STRING, IDM_VRIGHT, L"To right\tCtrl+Shift+3"); AppendMenuW(sv, MF_STRING, IDM_VLEFT, L"To left\tCtrl+3"); AppendMenuW(sv, MF_STRING, IDM_VTOP, L"To top\tCtrl+Shift+7"); AppendMenuW(sv, MF_STRING, IDM_VBOTTOM, L"To bottom\tCtrl+7");
   AppendMenuW(rm, MF_STRING, IDM_RSOLID, L"Render solid"); AppendMenuW(rm, MF_STRING, IDM_RWIRE, L"Render wireframe"); AppendMenuW(rm, MF_STRING, IDM_RPOINTS, L"Render points"); AppendMenuW(rm, MF_STRING, IDM_RWIRESOLID, L"Render wireframe over solid"); AppendMenuW(rm, MF_STRING, IDM_RPOINTSSOLID, L"Render points and solid"); AppendMenuW(rm, MF_SEPARATOR, 0, nullptr); AppendMenuW(rm, MF_STRING, IDM_SMOOTH, L"Smooth shading"); AppendMenuW(rm, MF_STRING, IDM_FLAT, L"Flat shading");
   AppendMenuW(bf, MF_STRING, IDM_BF_SHOW, L"Show"); AppendMenuW(bf, MF_STRING, IDM_BF_CULL, L"Cull"); AppendMenuW(bf, MF_STRING, IDM_BF_BLACK, L"Black"); AppendMenuW(bf, MF_STRING, IDM_BF_TRANS, L"Transparent");
@@ -322,12 +324,12 @@ static void buildMenu() {
   AppendMenuW(v, MF_STRING, IDM_DAYLIGHT, L"Daylight mode (outdoors: white background, dark surfaces, big text)"); AppendMenuW(v, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(v, MF_STRING, IDM_FIT, L"Fit to view\tF"); AppendMenuW(v, MF_STRING, IDM_HOME, L"Home\tH"); AppendMenuW(v, MF_STRING, IDM_SETHOME, L"Set current view as Home"); AppendMenuW(v, MF_POPUP, (UINT_PTR)sv, L"Viewpoints"); AppendMenuW(v, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(v, MF_STRING, IDM_ORTHO, L"Orthogonal projection\tCtrl+5"); AppendMenuW(v, MF_STRING, IDM_GRID, L"Show grid\tG"); AppendMenuW(v, MF_STRING, IDM_LIGHT, L"Lighting\tL"); AppendMenuW(v, MF_STRING, IDM_RANGE, L"Range meter"); AppendMenuW(v, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(v, MF_POPUP, (UINT_PTR)rm, L"Rendering"); AppendMenuW(v, MF_POPUP, (UINT_PTR)bf, L"Backface rendering"); AppendMenuW(v, MF_POPUP, (UINT_PTR)cm, L"Color"); AppendMenuW(v, MF_SEPARATOR, 0, nullptr); AppendMenuW(v, MF_STRING, IDM_SHOT, L"Save screenshot…\tCtrl+Shift+S");
+  AppendMenuW(v, MF_POPUP, (UINT_PTR)rm, L"Rendering"); AppendMenuW(v, MF_POPUP, (UINT_PTR)bf, L"Backface rendering"); AppendMenuW(v, MF_POPUP, (UINT_PTR)cm, L"Color"); AppendMenuW(v, MF_POPUP, (UINT_PTR)cur, L"Cursor (rotation center)"); AppendMenuW(v, MF_SEPARATOR, 0, nullptr); AppendMenuW(v, MF_STRING, IDM_SHOT, L"Save screenshot…\tCtrl+Shift+S");
   AppendMenuW(w, MF_STRING, IDM_SCANPANEL, L"Scan panel\tF7"); AppendMenuW(w, MF_STRING, IDM_WORKSPACE, L"Workspace\tF11"); AppendMenuW(w, MF_STRING, IDM_LOG, L"Log window\tCtrl+Alt+L");
   AppendMenuW(sb, MF_STRING, IDM_SHOT_WHITE, L"White"); AppendMenuW(sb, MF_STRING, IDM_SHOT_BLACK, L"Black");
-  AppendMenuW(st, MF_STRING, IDM_AUTOALIGN, L"After tracking loss: search for position (scan using auto-alignment)"); AppendMenuW(st, MF_STRING, IDM_AUDIO, L"Enable audio warnings in scan mode"); AppendMenuW(st, MF_STRING, IDM_ZOOMCUR, L"Mouse-wheel zoom to cursor"); AppendMenuW(st, MF_POPUP, (UINT_PTR)sb, L"Background for screenshots");
+  AppendMenuW(st, MF_STRING, IDM_AUDIO, L"Enable audio warnings in scan mode"); AppendMenuW(st, MF_STRING, IDM_ZOOMCUR, L"Mouse-wheel zoom to cursor"); AppendMenuW(st, MF_POPUP, (UINT_PTR)sb, L"Background for screenshots");
   AppendMenuW(h, MF_STRING, IDM_ABOUT, L"About and hot keys");
-  AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)f, L"File"); AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)e, L"Edit"); AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)v, L"View"); AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)w, L"Window"); AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)st, L"Settings"); AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)h, L"Help"); SetMenu(g_hwnd, g_menu);
+  AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)f, L"File"); if (g_labMode) AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)e, L"Edit"); else DestroyMenu(e); AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)v, L"View"); AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)w, L"Window"); AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)st, L"Settings"); AppendMenuW(g_menu, MF_POPUP, (UINT_PTR)h, L"Help"); SetMenu(g_hwnd, g_menu);
 }
 static void syncMenu() {
   CheckMenuItem(g_menu, IDM_ORTHO, view::ortho ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_GRID, view::grid ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_LIGHT, view::lighting ? MF_CHECKED : 0); CheckMenuItem(g_menu, IDM_RANGE, view::rangeMeter ? MF_CHECKED : 0);
@@ -520,6 +522,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   // No scanner at start (3 Nov 17:10: cameras wedged after a USB drop, createScanner 0xC0050000): open the window
   // anyway and keep trying to connect; the status bar says what to do. No modal box, no exit.
   if (cmd && wcsstr(cmd, L"--replay")) replay::on = true;   /* decided before the scanner is looked for */
+  // 8 Nov (owner): in the field ArtecRec only scans and saves; placing and processing are done in Studio. The Edit menu
+  // and the processing after Stop exist only in lab mode (--lab), which the tests and the replay benchmark use.
+  if (cmd && (wcsstr(cmd, L"--lab") || wcsstr(cmd, L"--replay-bench") || wcsstr(cmd, L"--process-test"))) g_labMode = true;
   bool scannerOk = replay::on ? false : connectScanner(); if (!scannerOk && !replay::on) logf("no scanner at start: will keep trying");
   WNDCLASSW wc = {}; wc.lpfnWndProc = wndProc; wc.hInstance = hi; wc.lpszClassName = L"ArtecRecMain"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); RegisterClassW(&wc);
   WNDCLASSW gc = {}; gc.lpfnWndProc = view::proc; gc.hInstance = hi; gc.lpszClassName = L"ArtecRecGL"; gc.style = CS_OWNDC | CS_DBLCLKS; gc.hCursor = LoadCursor(nullptr, IDC_ARROW); RegisterClassW(&gc);
@@ -529,7 +534,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   g_font = CreateFontW(uik(17), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); g_fontB = CreateFontW(uik(18), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI"); g_fontSmall = CreateFontW(uik(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
   wchar_t dev[160]; if (scannerOk) swprintf(dev, 160, L"Artec Scanner [%s]", g_scannerId.serial); else wcscpy(dev, L"(no scanner connected)");
   panel::create(g_hwnd, g_font, g_fontB, g_fontSmall, dev); ws::create(g_hwnd, g_font, g_fontB); ws::onChanged = [] { };
-  panel::loadIni(); syncMenu();   // Scan-panel settings as the user left them last time (Studio does the same)
+  panel::loadIni(); S.fieldMode = !g_labMode; syncMenu();   // Scan-panel settings as the user left them last time (Studio does the same); the field build never processes after Stop
   g_view = CreateWindowW(L"ArtecRecGL", L"", WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, g_hwnd, nullptr, hi, nullptr); view::init(g_view);
   g_logBox = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 10, 10, g_hwnd, nullptr, hi, nullptr); SendMessageW(g_logBox, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
   g_statusBar = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 10, 10, g_hwnd, nullptr, hi, nullptr); SendMessageW(g_statusBar, WM_SETFONT, (WPARAM)g_font, TRUE);
@@ -547,6 +552,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
         MessageBoxW(g_hwnd, m.c_str(), APP, MB_ICONWARNING); } } }
   bool autosaveTest = false, processTest = false; std::wstring cmdl = cmd ? cmd : L""; { size_t at = cmdl.find(L"--autosave-test"); if (at != std::wstring::npos) { autosaveTest = true; cmdl.erase(at, 15); }
     at = cmdl.find(L"--process-test"); if (at != std::wstring::npos) { processTest = true; cmdl.erase(at, 14); }
+    at = cmdl.find(L"--lab"); if (at != std::wstring::npos) cmdl.erase(at, 5);
     at = cmdl.find(L"--replay-bench"); if (at != std::wstring::npos) { size_t b = at + 14; while (b < cmdl.size() && cmdl[b] == L' ') b++; size_t e = cmdl.find(L' ', b); if (e == std::wstring::npos) e = cmdl.size(); g_benchCsv = cmdl.substr(b, e - b); cmdl.erase(at, e - at); replay::on = true; g_benchCsv.erase(std::remove(g_benchCsv.begin(), g_benchCsv.end(), L'"'), g_benchCsv.end()); }
     at = cmdl.find(L"--replay-from-mid"); if (at != std::wstring::npos) { g_benchMid = true; cmdl.erase(at, 17); }
     at = cmdl.find(L"--replay-from-overlap"); if (at != std::wstring::npos) { g_benchOverlap = true; cmdl.erase(at, 21); }

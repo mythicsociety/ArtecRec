@@ -289,7 +289,7 @@ TEST(sys_cancel_processing, "no-limit") {
   CHECK(alive()); CHECK_RESPONSIVE("cancelling processing"); killApp();
 }
 TEST(sys_global_registration_esc_cancels, "no-limit") {
-  if (!exists(EXE()) || !exists(PROJ())) SKIP("sys_prepare did not run"); killApp(); std::string why; if (!launch(PROJ(), why)) { killApp(); CHECK_MSG(false, why); return; }
+  if (!exists(EXE()) || !exists(PROJ())) SKIP("sys_prepare did not run"); killApp(); std::string why; if (!launch(PROJ() + L" --lab", why)) { killApp(); CHECK_MSG(false, why); return; }   // 8 Nov: the Edit menu exists only in lab mode
   if (!waitLog("open 0x", 240) || !waitLog("search reference built", 180, 7)) { killApp(); SKIP("project did not open and settle"); } resetSample();
   postCmd(IDM_GLOBALREG); Sleep(6000); PostMessageW(g_main, WM_KEYDOWN, VK_ESCAPE, 0);
   HWND d = waitDialog(10); CHECK_MSG(d != nullptr, "Esc did not ask to cancel"); if (d) { NOTE(narrow(dialogText(d))); clickButton(d, IDYES); waitGone(d, 5); }

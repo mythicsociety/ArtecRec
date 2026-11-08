@@ -20,13 +20,14 @@ static void layout() {
   place(lStatus, x, y, cw, 150); y += 158;
   int bw = (cw - 12) / 3; place(bPreview, x, y, bw, 34); place(bRecord, x + bw + 6, y, bw, 34); place(bStop, x + 2 * (bw + 6), y, bw, 34); y += 48;
   place(lTrack, x, y, cw, 20); y += 22; place(rGeoTex, x, y, cw, 22); y += 24; place(rGeo, x, y, cw, 22); y += 24; place(rTargets, x, y, cw, 22); y += 32;
-  place(cDist, x, y, cw, 22); y += 24; place(cAlign, x, y, cw, 22); y += 24; place(cBase, x, y, cw, 22); y += 24; place(cFusion, x, y, cw, 22); y += 24; place(cRtp, x, y, cw, 22); y += 32;
+  place(cDist, x, y, cw, 22); y += 24; place(cBase, x, y, cw, 22); y += 24; place(cFusion, x, y, cw, 22); y += 24; place(cRtp, x, y, cw, 22); y += 32;   // 8 Nov: the live-join box moved under Advanced (passes are placed in Studio)
   place(lSpeed, x, y, cw, 20); y += 20; place(lSpeedL, x, y, 60, 18); place(lSpeedR, x + cw - 60, y, 60, 18); y += 18; place(sSpeed, x, y, cw, 26); y += 40;
   place(bAdv, x, y, cw, 26); y += 32;
-  HWND advs[] = {cHide, lDof, lNear, sNear, lTicks, lFar, sFar, cMotion, lName, eName, lSens, lSensL, lSensR, sSens, lBright, lBrightL, lBrightR, sBright, cAuto, lUse, lUseDev, cNoTex, cNoFlash, lFreq, rFreqAuto, rFreqN, eFreqN, lFreqN, lDelay, eDelay, lDelayS, cLimit, eLimit};
+  HWND advs[] = {cHide, cAlign, lDof, lNear, sNear, lTicks, lFar, sFar, cMotion, lName, eName, lSens, lSensL, lSensR, sSens, lBright, lBrightL, lBrightR, sBright, cAuto, lUse, lUseDev, cNoTex, cNoFlash, lFreq, rFreqAuto, rFreqN, eFreqN, lFreqN, lDelay, eDelay, lDelayS, cLimit, eLimit};
   for (HWND h : advs) ShowWindow(h, advOpen ? SW_SHOW : SW_HIDE);
   if (advOpen) {
     place(cHide, x, y, cw, 22); y += 30;
+    place(cAlign, x, y, cw, 22); y += 30;
     place(lDof, x, y, cw, 20); y += 22; place(lNear, x, y, 100, 20); place(sNear, x + 102, y - 3, cw - 102, 26); y += 26; place(lTicks, x + 102, y, cw - 102, 16); y += 18; place(lFar, x, y, 100, 20); place(sFar, x + 102, y - 3, cw - 102, 26); y += 34;
     place(cMotion, x, y, cw, 22); y += 30;
     place(lName, x, y, cw, 20); y += 22; place(eName, x, y, cw, 24); y += 32;
@@ -89,7 +90,7 @@ static void create(HWND parent, HFONT f, HFONT fb, HFONT fs, const wchar_t* scan
   lTrack = mk(L"STATIC", L"Features to track", SS_LEFT); rGeoTex = mk(L"BUTTON", L"Geometry + Texture", BS_AUTORADIOBUTTON | WS_GROUP); rGeo = mk(L"BUTTON", L"Geometry", BS_AUTORADIOBUTTON); rTargets = mk(L"BUTTON", L"Targets   (not available in the SDK)", BS_AUTORADIOBUTTON);
   SendMessageW(rGeoTex, BM_SETCHECK, BST_CHECKED, 0); EnableWindow(rTargets, FALSE);
   cDist = mk(L"BUTTON", L"Show distance color", BS_AUTOCHECKBOX | WS_GROUP); SendMessageW(cDist, BM_SETCHECK, BST_CHECKED, 0);
-  cAlign = mk(L"BUTTON", L"Auto-align new scans with those marked in Workspace", BS_AUTOCHECKBOX); SendMessageW(cAlign, BM_SETCHECK, BST_CHECKED, 0);   // review F2: on by default
+  cAlign = mk(L"BUTTON", L"Auto-align new scans while scanning (optional; passes are placed in Studio)", BS_AUTOCHECKBOX); SendMessageW(cAlign, BM_SETCHECK, BST_UNCHECKED, 0);   // 8 Nov (owner): off by default, under Advanced
   cBase = mk(L"BUTTON", L"Enable automatic base removal   (not in the SDK)", BS_AUTOCHECKBOX); EnableWindow(cBase, FALSE);
   cFusion = mk(L"BUTTON", L"Real-time fusion   (not in the SDK)", BS_AUTOCHECKBOX); EnableWindow(cFusion, FALSE);
   cRtp = mk(L"BUTTON", L"Enable real-time processing   (always on)", BS_AUTOCHECKBOX); SendMessageW(cRtp, BM_SETCHECK, BST_CHECKED, 0); EnableWindow(cRtp, FALSE);
@@ -128,7 +129,7 @@ static void saveIni() {
 static void loadIni() {
   std::wstring f = iniPath(); if (GetFileAttributesW(f.c_str()) == INVALID_FILE_ATTRIBUTES) { iniLoaded = true; return; } auto ri = [&](const wchar_t* k, int d) { return (int)GetPrivateProfileIntW(L"scan", k, d, f.c_str()); };
   auto chk = [](HWND h, bool v) { SendMessageW(h, BM_SETCHECK, v ? BST_CHECKED : BST_UNCHECKED, 0); }; auto pos = [](HWND h, int v) { SendMessageW(h, TBM_SETPOS, TRUE, v); };
-  int tr = ri(L"tracking", 0); chk(rGeoTex, tr == 0); chk(rGeo, tr == 1); chk(cDist, ri(L"distColor", 1)); int iniVer = ri(L"iniVersion", 1); int aa = iniVer >= 2 ? ri(L"autoAlign", 1) : 1;   /* cloud review: builds before 5 Nov stored autoAlign=0 as their default; switch it on once */ /* review F2: joining new passes is on unless the user switched it off */ chk(cAlign, aa != 0); chk(cHide, ri(L"hidePanel", 1));
+  int tr = ri(L"tracking", 0); chk(rGeoTex, tr == 0); chk(rGeo, tr == 1); chk(cDist, ri(L"distColor", 1)); int aa = ri(L"autoAlign", 0);   /* 8 Nov (owner): the live join is optional and off unless switched on; passes are placed in Studio */ chk(cAlign, aa != 0); chk(cHide, ri(L"hidePanel", 1));
   pos(sSpeed, ri(L"speed", 8)); pos(sNear, ri(L"near", 170)); pos(sFar, ri(L"far", 330)); pos(sSens, ri(L"sens", 0)); pos(sBright, ri(L"texBright", 0)); chk(cAuto, ri(L"autoBright", 1));
   chk(cNoTex, !ri(L"recordTexture", 1)); chk(cNoFlash, !ri(L"flash", 1)); int tf = ri(L"texFreq", 0); chk(rFreqAuto, tf == 0); chk(rFreqN, tf == 1); wchar_t b[32];
   swprintf(b, 32, L"%d", ri(L"texEvery", 1)); SetWindowTextW(eFreqN, b); swprintf(b, 32, L"%d", ri(L"delay", 0)); SetWindowTextW(eDelay, b); chk(cLimit, ri(L"limitFrames", 0)); swprintf(b, 32, L"%d", ri(L"frameLimit", 2000)); SetWindowTextW(eLimit, b);
