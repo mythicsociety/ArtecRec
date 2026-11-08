@@ -195,3 +195,4 @@ laptop; the Trail31 recovery question will show at the next start. Lab recipe po
 12:25: Trail31_full built on the laptop with sdk-fps/mergeproj (Trail31's 5 scans + the 5 autosaved passes of
 20261107-112323; 10 scans, 8.1 GB, 529 s). The recovery dialog only ever offered the oldest autosave folder (fixed in
 810b6e3, built 12:09, not yet installed). The laptop's SDK DLLs live in D:\ArtecRec (no Program Files SDK there).
+12:40: INSTALLED 810b6e3 (scan-and-save + recovery dialog asks every folder), MD5 202e276a58303934515fdcf1d82724c7. Trail31_full (10 scans) opened fine in ArtecRec (96 s).
