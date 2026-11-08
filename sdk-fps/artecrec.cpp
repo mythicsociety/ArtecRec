@@ -560,8 +560,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR cmd, int) {
   // autosave recovery: passes recorded after the last save of a session that did not end normally
   if (cmdl.empty()) { auto rec = autosaveRecoverable(); for (auto& r : rec) { int n = (int)r.second.size();
       std::wstring q = L"ArtecRec did not close normally last time.\n\n" + std::to_wstring(n) + L" pass(es) recorded after the last save were autosaved (" + logic::leafOf(r.first) + L").\n\nLoad them now? Then save the project.\n\nNo = keep them and ask again next time.";
-      if (MessageBoxW(g_hwnd, q.c_str(), APP, MB_YESNO | MB_ICONQUESTION) == IDYES) { int got = autosaveRecover(r.first, r.second); ws::refresh(); ws::showProps(); view::fit(); view::setHome(); g_firstScan = false; notice(std::to_wstring(got) + L" pass(es) recovered. Save the project now."); }
-      break; } }
+      // 8 Nov: ask about each autosave folder in turn (a "No" on an old one used to hide the newer ones); one recovery per start
+      if (MessageBoxW(g_hwnd, q.c_str(), APP, MB_YESNO | MB_ICONQUESTION) == IDYES) { int got = autosaveRecover(r.first, r.second); ws::refresh(); ws::showProps(); view::fit(); view::setHome(); g_firstScan = false; notice(std::to_wstring(got) + L" pass(es) recovered. Save the project now."); break; } } }
   if (!cmdl.empty()) { std::wstring p = cmdl; if (p.size() > 2 && p.front() == L'"') p = p.substr(1, p.size() - 2); openPath(p); }   // review A9: Busy while loading (no recording meanwhile)
   if (autosaveTest) { int n = 0; for (auto& sc : g_scans) { autosaveScan(sc.scan, sc.name); n++; } logf("autosave test: %d pass(es) queued", n); }
   if (processTest) { int n = 0; for (auto& sc : g_scans) { startPostProcess(sc.scan, true, true); n++; } logf("process test: %d pass(es) being optimised", n); }
