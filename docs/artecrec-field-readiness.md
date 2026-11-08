@@ -161,3 +161,12 @@ disconnects at 10:42, 10:56, 10:58, 11:38. Daylight mode not liked (dark surface
 background and opaque bars stay. Owner: Studio users find ArtecRec hard; Field mode + loss handling + plain banners
 were the response. Open: the view/panel size while recording, a one-switch simplification, the 2.0 s stall check.
 Full laptop log of the day archived: docs/logs/2026-11-07-museum.log (1.19 MB). After the 10:33 build: 23 losses ridden out in the same scan, median 1.0 s, longest 7.1 s.
+
+### 8 Nov 05:00-06:10 — the square holes in the museum models (fusetest on Kittayya, Trail30 = stone 3, 3 Field-mode passes, 1,785 frames)
+Madhusudhan: holes appear in scanned areas of all three models; Fusion fills them but why are they there? My theory:
+Field mode skips fine registration, Fusion rejects the mismatched tile edges. Test: `sdk-fps/fusetest.exe`, Poisson
+sharp 0.3 mm, fill radius 1 mm, same settings both runs. RAW: 2,813 boundary loops (101 over 25 mm), 14.8 M points.
+FINE + GLOBAL (fine reg 9/2/6 s, global 770 s, saved as D:\ArtecReplayield\Trail30_fine\Trail30_fine.sproj on Kittayya):
+2,350 loops (77 over 25 mm), 12.1 M points. Fine registration tightens the surface and removes ~1 hole in 6, so it
+belongs in the lab step, but it is NOT the main cause: most holes are in the passes themselves (single coverage, dark
+patches, losses). Next: a coverage view while scanning (colour by how many frames saw each spot).
