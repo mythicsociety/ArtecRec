@@ -1,0 +1,82 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>__NAME__</title>
+<style>
+ body{margin:0;font:15px system-ui,sans-serif;background:#23242a;color:#eee;display:flex;height:100vh}
+ #side{width:300px;padding:14px;box-sizing:border-box;background:#1a1b1f;overflow:auto}
+ #view{flex:1;position:relative} canvas{display:block}
+ h1{font-size:20px;margin:0 0 6px} .k{color:#9aa} .v{font-weight:600}
+ label{display:block;margin:6px 0;cursor:pointer} input[type=range]{width:100%}
+ .box{border:1px solid #333;border-radius:8px;padding:10px;margin:10px 0}
+ #prof{width:100%;background:#15161a;border-radius:6px}
+ button{font:14px system-ui;padding:6px 10px;border:0;border-radius:6px;background:#444;color:#fff;cursor:pointer;margin:2px}
+</style></head><body>
+<div id="side">
+ <h1>__NAME__</h1>
+ <div class="box" id="facts">loading…</div>
+ <div class="box">
+  <label><input type="radio" name="col" value="plain" checked> Sherd, plain</label>
+  <label><input type="radio" name="col" value="thick"> Sherd, wall thickness</label>
+  <div id="legend" style="height:10px;border-radius:5px;background:linear-gradient(90deg,#285ac8,#3caa78,#e6c83c,#d23c32);margin:4px 0"></div>
+  <div style="display:flex;justify-content:space-between;font-size:12px" class="k"><span id="tmin">thin</span><span id="tmax">thick</span></div>
+ </div>
+ <div class="box">
+  <label><input type="checkbox" id="known" checked> Reconstruction: measured arc</label>
+  <label><input type="checkbox" id="ghost" checked> Reconstruction: ghost (unmeasured)</label>
+  <label>Ghost opacity <input type="range" id="gop" min="0" max="100" value="25"></label>
+  <label><input type="checkbox" id="cut"> Section cut (half pot)</label>
+  <label>Cut angle <input type="range" id="cutang" min="0" max="360" value="0"></label>
+  <label><input type="checkbox" id="axis" checked> Axis and rim plane</label>
+ </div>
+ <div class="box">
+  <div class="k" style="margin-bottom:4px">Profile (radius → , height ↑), mm</div>
+  <canvas id="prof" width="270" height="220"></canvas>
+ </div>
+ <div><button id="top">Top</button><button id="front">Front</button><button id="iso">3/4</button></div>
+ <div class="k" style="font-size:12px;margin-top:10px">Solid = what was scanned. Ghost = the pot the measured profile implies, spun round the axis. Nothing is known below or beyond the sherd.</div>
+</div>
+<div id="view"></div>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three'; import {OrbitControls} from 'three/addons/controls/OrbitControls.js'; import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+const NAME='__NAME__'; const view=document.getElementById('view'); const scene=new THREE.Scene(); scene.background=new THREE.Color(0x23242a);
+const cam=new THREE.PerspectiveCamera(38,1,1,5000); const ren=new THREE.WebGLRenderer({antialias:true}); ren.localClippingEnabled=true; view.appendChild(ren.domElement);
+const ctl=new OrbitControls(cam,ren.domElement); ctl.enableDamping=true;
+scene.add(new THREE.HemisphereLight(0xffffff,0x303030,1.0)); const dl=new THREE.DirectionalLight(0xffffff,1.1); dl.position.set(1,2,1.5); scene.add(dl); const dl2=new THREE.DirectionalLight(0xffffff,0.5); dl2.position.set(-2,1,-1); scene.add(dl2);
+function resize(){const w=view.clientWidth,h=view.clientHeight;ren.setSize(w,h);cam.aspect=w/h;cam.updateProjectionMatrix()} window.addEventListener('resize',resize);resize();
+const loader=new GLTFLoader(); const parts={}; const clip=new THREE.Plane(new THREE.Vector3(0,0,1),0); let info=null, R=50;
+async function glb(n){return new Promise((ok,err)=>loader.load(NAME+'-'+n+'.glb',g=>ok(g.scene),undefined,err))}
+function mat(opts){return new THREE.MeshStandardMaterial(Object.assign({vertexColors:false,roughness:0.9,metalness:0,side:THREE.DoubleSide,clippingPlanes:[clip],clipShadows:true},opts))}
+function setMat(obj,m){obj.traverse(o=>{if(o.isMesh){o.material=m; o.geometry.computeVertexNormals()}})}
+info=await (await fetch(NAME+'-info.json')).json(); R=Math.max(info.rimDiameterMm?info.rimDiameterMm/2:40,30);
+const f=document.getElementById('facts'); f.innerHTML=
+ `<div><span class="k">Rim diameter</span> <span class="v">${info.rimDiameterMm?info.rimDiameterMm.toFixed(0)+' mm':'unknown'}</span></div>
+  <div><span class="k">Rim present</span> <span class="v">${info.arcDeg.toFixed(0)}° of 360</span></div>
+  <div><span class="k">Height scanned</span> <span class="v">${info.heightMm.toFixed(0)} mm</span></div>
+  <div><span class="k">Wall thickness</span> <span class="v">${info.thicknessMedian.toFixed(1)} mm</span> <span class="k">median</span></div>
+  <div><span class="k">Orientation</span> <span class="v">${info.orientQuality||'-'}</span></div>`;
+document.getElementById('tmin').textContent=info.thicknessMin.toFixed(1)+' mm'; document.getElementById('tmax').textContent=info.thicknessMax.toFixed(1)+' mm';
+parts.plain=await glb('sherd'); setMat(parts.plain,mat({color:0xc8c3b9})); scene.add(parts.plain);
+parts.thick=await glb('thick'); setMat(parts.thick,mat({vertexColors:true})); parts.thick.visible=false; scene.add(parts.thick);
+if(info.hasReconstruction){parts.known=await glb('known'); setMat(parts.known,mat({color:0xcdaa82,transparent:true,opacity:0.55})); parts.known.visible=info.arcDeg<300; document.getElementById('known').checked=parts.known.visible; scene.add(parts.known);
+ parts.ghost=await glb('ghost'); setMat(parts.ghost,mat({color:0x8aa0c8,transparent:true,opacity:0.25,depthWrite:false})); scene.add(parts.ghost)}
+// axis + rim plane
+const ax=new THREE.Group(); const L=R*1.6; ax.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,-L,0),new THREE.Vector3(0,L*0.6,0)]),new THREE.LineBasicMaterial({color:0xffd60a})));
+const ring=new THREE.Mesh(new THREE.TorusGeometry(R,Math.max(0.3,R*0.006),8,128),new THREE.MeshBasicMaterial({color:0xff3b30})); ring.rotation.x=Math.PI/2; ax.add(ring); scene.add(ax);
+// profile drawing
+const pc=document.getElementById('prof'); const g=pc.getContext('2d'); if(info.profile&&info.profile.length){const P=info.profile; const xs=P.map(p=>p[0]),ys=P.map(p=>p[1]); const x0=Math.min(...xs,0),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+ const s=Math.min((pc.width-30)/Math.max(x1-x0,1),(pc.height-20)/Math.max(y1-y0,1)); const X=x=>15+(x-x0)*s, Y=y=>pc.height-10-(y-y0)*s;
+ g.fillStyle='#15161a'; g.fillRect(0,0,pc.width,pc.height); g.strokeStyle='#ffd60a'; g.beginPath(); g.moveTo(X(0),0); g.lineTo(X(0),pc.height); g.stroke(); g.strokeStyle='#ff3b30'; g.beginPath(); g.moveTo(0,Y(0)); g.lineTo(pc.width,Y(0)); g.stroke();
+ g.strokeStyle='#eee'; g.lineWidth=1.5; g.beginPath(); P.forEach((p,i)=>{i?g.lineTo(X(p[0]),Y(p[1])):g.moveTo(X(p[0]),Y(p[1]))}); g.closePath(); g.stroke();
+ g.fillStyle='#9aa'; g.font='11px system-ui'; g.fillText((x1-x0).toFixed(0)+' mm wide, '+(y1-y0).toFixed(0)+' mm high, cut at '+info.profileAzimuth.toFixed(0)+'°',4,12)}
+// controls
+document.querySelectorAll('input[name=col]').forEach(r=>r.onchange=()=>{const t=document.querySelector('input[name=col]:checked').value; parts.plain.visible=t==='plain'; parts.thick.visible=t==='thick'});
+document.getElementById('known').onchange=e=>{if(parts.known)parts.known.visible=e.target.checked}; document.getElementById('ghost').onchange=e=>{if(parts.ghost)parts.ghost.visible=e.target.checked};
+document.getElementById('gop').oninput=e=>{if(parts.ghost)parts.ghost.traverse(o=>{if(o.isMesh)o.material.opacity=e.target.value/100})};
+function updClip(){const on=document.getElementById('cut').checked; const a=document.getElementById('cutang').value*Math.PI/180; clip.normal.set(Math.cos(a),0,Math.sin(a)); clip.constant=on?0:1e6}
+document.getElementById('cut').onchange=updClip; document.getElementById('cutang').oninput=updClip; updClip();
+document.getElementById('axis').onchange=e=>ax.visible=e.target.checked;
+function look(x,y,z){cam.position.set(x,y,z); ctl.target.set(0,-info.heightMm/2,0)}
+document.getElementById('top').onclick=()=>look(0,R*4,0.01); document.getElementById('front').onclick=()=>look(0,0,R*4); document.getElementById('iso').onclick=()=>look(R*2.5,R*2,R*2.5);
+cam.near=R*0.02; cam.far=R*60; cam.updateProjectionMatrix(); look(R*2.5,R*2,R*2.5);
+(function loop(){requestAnimationFrame(loop);ctl.update();ren.render(scene,cam)})();
+</script></body></html>

@@ -33,7 +33,7 @@ const ctl=new OrbitControls(cam,ren.domElement); ctl.enableDamping=true;
 scene.add(new THREE.HemisphereLight(0xffffff,0x444444,1.1)); const dl=new THREE.DirectionalLight(0xffffff,1.2); dl.position.set(1,2,3); scene.add(dl);
 function resize(){const w=view.clientWidth,h=view.clientHeight;ren.setSize(w,h);cam.aspect=w/h;cam.updateProjectionMatrix()} window.addEventListener('resize',resize);resize();
 let list=[],cur=-1,mesh=null,geo=null,overlay=new THREE.Group(),marks=new THREE.Group(),lastFit=null,F=null,busy=false,clicks=[]; scene.add(overlay); scene.add(marks);
-async function loadList(){list=await (await fetch('/list')).json(); listEl.innerHTML=''; list.forEach((m,k)=>{const d=document.createElement('div');d.textContent=m.name;d.className=m.done?'done':'';d.onclick=()=>open(k);listEl.appendChild(d)});
+async function loadList(){list=await (await fetch('/list')).json(); listEl.innerHTML=''; list.forEach((m,k)=>{const d=document.createElement('div');d.textContent=m.name;d.className=m.done?'done':'';d.onclick=()=>open(k); if(m.page){const a=document.createElement('a');a.textContent=' 3D page';a.href='/pages/'+encodeURIComponent(m.name)+'.html';a.target='_blank';a.style.color='#8cf';a.style.marginLeft='6px';a.onclick=e=>e.stopPropagation();d.appendChild(a)} listEl.appendChild(d)});
  const first=list.findIndex(m=>!m.done); open(first<0?0:first)}
 function setButtons(fit){document.getElementById('accept').disabled=!fit;document.getElementById('flip').disabled=!fit;document.getElementById('retry').disabled=!(fit||clicks.length)}
 async function open(k){if(busy)return; cur=k; [...listEl.children].forEach((d,i)=>d.classList.toggle('cur',i===k)); listEl.children[k]?.scrollIntoView({block:'nearest'});

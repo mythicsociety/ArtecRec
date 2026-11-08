@@ -93,6 +93,12 @@ def orient_and_save(i, d, r):
     meta = {"source": files[i], "rimCentre": r["centre"], "axisUp": r["up"], "rimDiameterMm": r["diameter"], "residualMm": r["residual"], "arcDeg": r["arcDeg"], "quality": r["quality"], "rotation": R.tolist(), "method": "rimclick one-click (8 Nov 2026)"}
     json.dump(meta, open(os.path.join(OUT, base + "-oriented.json"), "w"), indent=1); return base + "-oriented.ply"
 
+def build_page(i):
+    try:
+        import subprocess; base = os.path.splitext(os.path.basename(files[i]))[0]
+        subprocess.run([sys.executable, os.path.join(HERE, "sherdpage.py"), os.path.join(OUT, base + "-oriented.ply"), os.path.join(OUT, "pages")], check=True, capture_output=True, timeout=1800)
+    except Exception as e: print("page build failed:", e, flush=True)
+
 def mesh_bytes(d):
     V = d["V"].astype(np.float32); F = d["F"].astype(np.uint32); hdr = np.array([len(V), len(F)], np.uint32).tobytes(); return hdr + V.tobytes() + F.tobytes()
 
@@ -105,14 +111,20 @@ class H(BaseHTTPRequestHandler):
         if p == "/": return self.send(200, open(os.path.join(HERE, "rimtool.html"), "rb").read(), "text/html; charset=utf-8")
         if p == "/list":
             done = {os.path.splitext(f)[0].replace("-oriented", "") for f in os.listdir(OUT) if f.endswith("-oriented.json")}
-            return self.send(200, json.dumps([{"i": i, "name": os.path.splitext(os.path.basename(f))[0], "done": os.path.splitext(os.path.basename(f))[0] in done} for i, f in enumerate(files)]).encode())
+            pages = {f[:-5] for f in os.listdir(os.path.join(OUT, "pages")) if f.endswith(".html")} if os.path.isdir(os.path.join(OUT, "pages")) else set()
+            return self.send(200, json.dumps([{"i": i, "name": os.path.splitext(os.path.basename(f))[0], "done": os.path.splitext(os.path.basename(f))[0] in done, "page": os.path.splitext(os.path.basename(f))[0] in pages} for i, f in enumerate(files)]).encode())
+        if p.startswith("/pages/"):
+            import urllib.parse, mimetypes; f = os.path.join(OUT, "pages", urllib.parse.unquote(p[7:]).replace("/", os.sep))
+            if not os.path.isfile(f): return self.send(404, b"not built yet", "text/plain")
+            return self.send(200, open(f, "rb").read(), mimetypes.guess_type(f)[0] or "application/octet-stream")
         if p.startswith("/mesh/"):
             i = int(p[6:]); d = prep(i); return self.send(200, mesh_bytes(d), "application/octet-stream")
         return self.send(404, b"not found", "text/plain")
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0)); body = json.loads(self.rfile.read(n) or b"{}"); i = int(body["i"]); d = prep(i)
         if self.path == "/fit": return self.send(200, json.dumps(fit(d, body["points"])).encode())
-        if self.path == "/accept": return self.send(200, json.dumps({"saved": orient_and_save(i, d, body["result"])}).encode())
+        if self.path == "/accept":
+            saved = orient_and_save(i, d, body["result"]); threading.Thread(target=build_page, args=(i,), daemon=True).start(); return self.send(200, json.dumps({"saved": saved}).encode())
         if self.path == "/skip":
             base = os.path.splitext(os.path.basename(files[i]))[0]; json.dump({"source": files[i], "skipped": body.get("reason", "no rim")}, open(os.path.join(OUT, base + "-oriented.json"), "w")); return self.send(200, b"{}")
         return self.send(404, b"{}")
