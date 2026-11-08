@@ -52,6 +52,18 @@ static Holes holeStats(const IMesh* mesh) {
 }
 int wmain(int argc, wchar_t** argv) {
   if (argc < 3) { wprintf(L"usage: fusetest in.sproj outdir [--fine] [--global] [--res 0.5] [--save out.sproj]\n       fusetest --simplify in.ply out.ply [triangles]\n"); return 2; }
+  if (std::wstring(argv[1]) == L"--dumpframes") { if (argc < 4) return 2; setOutputLevel(VerboseLevel_Error); int every = argc > 4 ? _wtoi(argv[4]) : 150; SHCreateDirectoryExW(nullptr, argv[3], nullptr);
+    prj::IProject* p = nullptr; if (prj::openProject(&p, argv[2]) != ErrorCode_OK || !p) { wprintf(L"openProject failed\n"); return 1; }
+    std::vector<Uuid> v; for (int i = 0; i < p->getEntryCount(); i++) { prj::EntryInfo e; if (p->getEntry(i, &e, nullptr) == ErrorCode_OK && e.type == prj::EntryType_Scan) v.push_back(e.uuid); }
+    IArrayUuid* ids = nullptr; createArrayUuid(&ids, (int)v.size()); for (int i = 0; i < (int)v.size(); i++) ids->setElement(i, v[i]); prj::ProjectLoaderSettings ls; ls.entryList = ids; IJob* loader = nullptr; p->createLoader(&loader, &ls); IModel* m = nullptr; createModel(&m);
+    { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.out = m; ws.threadsCount = threads(); if (executeJob(loader, &ws) != ErrorCode_OK) { wprintf(L"load failed\n"); return 1; } loader->release(); } ids->release(); p->release();
+    for (int si = 0; si < m->getSize(); si++) { IScan* sc = m->getElement(si); for (int k = 0; k < sc->getSize(); k += every) { IFrameMesh* f = sc->getElement(k); if (!f) continue; int np = f->getPoints() ? f->getPoints()->getSize() : 0, nt = f->getTriangles() ? f->getTriangles()->getSize() : 0;
+        // bounding box of the frame's points and the share of a 2 mm grid filled: a frame with rectangular gaps fills less
+        const Point3F* q = f->getPoints()->getPointer(); float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f}; for (int i = 0; i < np; i++) { float c[3] = {q[i].x, q[i].y, q[i].z}; for (int a = 0; a < 3; a++) { lo[a] = std::min(lo[a], c[a]); hi[a] = std::max(hi[a], c[a]); } }
+        std::vector<char> cells; int gx = (int)((hi[0] - lo[0]) / 2) + 1, gy = (int)((hi[1] - lo[1]) / 2) + 1; cells.assign((size_t)gx * gy, 0); for (int i = 0; i < np; i++) cells[(size_t)((q[i].y - lo[1]) / 2) * gx + (size_t)((q[i].x - lo[0]) / 2)] = 1; long filled = 0; for (char c : cells) filled += c;
+        wchar_t name[64]; swprintf(name, 64, L"\\scan%d-frame%04d.ply", si + 1, k); std::wstring out = std::wstring(argv[3]) + name; ErrorCode ec = io::Ply::save(out.c_str(), f);
+        wprintf(L"scan %d frame %d: %d points, %d triangles, extent %.0f x %.0f mm, 2 mm cells filled %ld of %d (%.0f%%), textured %d, ply 0x%08X\n", si + 1, k, np, nt, hi[0] - lo[0], hi[1] - lo[1], filled, gx * gy, 100.0 * filled / (gx * gy), (int)f->isTextured(), (unsigned)ec); } }
+    return 0; }
   if (std::wstring(argv[1]) == L"--simplify") { if (argc < 4) return 2; setOutputLevel(VerboseLevel_Error); ICompositeMesh* cm = nullptr; ErrorCode ec = io::Ply::load(&cm, nullptr, argv[2]); if (ec != ErrorCode_OK || !cm) { wprintf(L"load 0x%08X\n", (unsigned)ec); return 1; }
     int target = argc > 4 ? _wtoi(argv[4]) : 1500000; IModel* in = nullptr; createModel(&in); ICompositeContainer* cc0 = nullptr; createCompositeContainer(&cc0); cc0->add(cm); in->setCompositeContainer(cc0); IModel* out = nullptr; createModel(&out);
     wprintf(L"loaded %d points, %d triangles\n", cm->getPoints() ? cm->getPoints()->getSize() : 0, cm->getTriangles() ? cm->getTriangles()->getSize() : 0);
@@ -70,6 +82,8 @@ int wmain(int argc, wchar_t** argv) {
   { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.out = m; ws.threadsCount = threads(); if (executeJob(loader, &ws) != ErrorCode_OK) { wprintf(L"load failed\n"); return 1; } loader->release(); } ids->release(); p->release();
   int ns = m->getSize(); long frames = 0; for (int i = 0; i < ns; i++) frames += m->getElement(i)->getSize(); ScannerType st = ns ? m->getElement(0)->getScannerType() : ScannerType_Spider;
   wprintf(L"loaded %d scan(s), %ld frames in %.0f s\n", ns, frames, secs(T0));
+  // normals for every frame (auto-align and fusion need them; a loaded project has none)
+  for (int i = 0; i < ns; i++) { IScan* s = m->getElement(i); for (int k = 0; k < s->getSize(); k++) { IFrameMesh* f = s->getElement(k); if (f && !f->hasPointsNormals()) f->calculate(CM_PointsNormals_Default); } }
   // fine registration of every scan (what Studio does at Stop and ArtecRec's Field mode skips)
   if (fine) { for (int i = 0; i < ns; i++) { IScan* s = m->getElement(i); int nf = s->getSize(); bool allTex = true; for (int k = 0; k < nf; k++) { IFrameMesh* f = s->getElement(k); if (!f || !f->isTextured()) { allTex = false; break; } }
       IModel* in = nullptr; createModel(&in); IModel* out = nullptr; createModel(&out); in->add(s);
@@ -95,8 +109,6 @@ int wmain(int argc, wchar_t** argv) {
     if (ec == ErrorCode_OK && q) { prj::ProjectSaverSettings ss; ss.path = saveTo.c_str(); generateUuid(&ss.projectId); ss.compressionLevel = 0; IJob* saver = nullptr; ec = q->createSaver(&saver, &ss);
       auto t0 = clk::now(); if (ec == ErrorCode_OK && saver) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = m; ws.threadsCount = threads(); ec = executeJob(saver, &ws); saver->release(); } q->release(); wprintf(L"saved project 0x%08X in %.0f s -> %s\n", (unsigned)ec, secs(t0), saveTo.c_str()); }
     else wprintf(L"createNewProject 0x%08X\n", (unsigned)ec); }
-  // normals for every frame (the fusion needs them; a loaded project has none)
-  for (int i = 0; i < ns; i++) { IScan* s = m->getElement(i); for (int k = 0; k < s->getSize(); k++) { IFrameMesh* f = s->getElement(k); if (f && !f->hasPointsNormals()) f->calculate(CM_PointsNormals_Default); } }
   // fusion: Poisson, sharp, holes not filled (ByRadius with radius 0), same settings for every run
   IModel* fused = nullptr; createModel(&fused); alg::PoissonFusionSettings fs; alg::initializePoissonFusionSettings(&fs, st); fs.fusionType = alg::PoissonFusionType_Sharp; fs.fillType = alg::FillHolesType_ByRadius; fs.maxHoleRadius = holeR; fs.resolution = res; fs.removeTargets = false;
   if (fillAll) fs.fillType = alg::FillHolesType_All;

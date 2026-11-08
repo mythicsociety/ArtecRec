@@ -170,3 +170,12 @@ FINE + GLOBAL (fine reg 9/2/6 s, global 770 s, saved as D:\ArtecReplayield\Trai
 2,350 loops (77 over 25 mm), 12.1 M points. Fine registration tightens the surface and removes ~1 hole in 6, so it
 belongs in the lab step, but it is NOT the main cause: most holes are in the passes themselves (single coverage, dark
 patches, losses). Next: a coverage view while scanning (colour by how many frames saw each spot).
+08:00 UPDATE: the "ledges" were passes ~1 m apart in depth. Field mode with the panel's auto-align off leaves every pass
+in the scanner's own starting coordinates; global registration cannot bridge that. fusetest --fine --align --global on
+Trail30: auto-align moved pass 2 by 999 mm and pass 3 by 978 mm, global registration then 28 s (was 770 s), fusion one
+surface, 1,768 loops (raw 2,813; fine+global 2,350), 66 over 25 mm (was 101). Saved Trail30_aligned3 on Kittayya.
+The square "holes" in the museum models are NOT surface holes: raw frames are solid 9x10 cm patches; with texture off in
+Studio the Trail31 scans are complete. They are photo gaps between sparse texture frames (texFreq auto), drawn white by
+Studio. Lab recipe: Fine -> Auto-align -> Global -> Fusion -> Texture (+ inpainting). Owner ran it on Kittayya/Studio
+on Trail31 (fine 235 s, auto-align 265 s converged). To do in ArtecRec: texture-frame coverage (more photos, or a
+coverage view), and "Prepare passes for the lab" (fine + auto-align + global in one click).
