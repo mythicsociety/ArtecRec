@@ -51,9 +51,16 @@ static Holes holeStats(const IMesh* mesh) {
   return h;
 }
 int wmain(int argc, wchar_t** argv) {
-  if (argc < 3) { wprintf(L"usage: fusetest in.sproj outdir [--fine] [--global] [--res 0.5] [--save out.sproj]\n"); return 2; }
-  bool fine = false, global = false, fast = false, fillAll = false; float res = 0.5f, holeR = 0; std::wstring saveTo; std::wstring outdir = argv[2];
-  for (int i = 3; i < argc; i++) { std::wstring a = argv[i]; if (a == L"--fine") fine = true; else if (a == L"--fast") fast = true; else if (a == L"--holer" && i + 1 < argc) holeR = (float)_wtof(argv[++i]); else if (a == L"--fillall") fillAll = true; else if (a == L"--global") global = true; else if (a == L"--res" && i + 1 < argc) res = (float)_wtof(argv[++i]); else if (a == L"--save" && i + 1 < argc) saveTo = argv[++i]; }
+  if (argc < 3) { wprintf(L"usage: fusetest in.sproj outdir [--fine] [--global] [--res 0.5] [--save out.sproj]\n       fusetest --simplify in.ply out.ply [triangles]\n"); return 2; }
+  if (std::wstring(argv[1]) == L"--simplify") { if (argc < 4) return 2; setOutputLevel(VerboseLevel_Error); ICompositeMesh* cm = nullptr; ErrorCode ec = io::Ply::load(&cm, nullptr, argv[2]); if (ec != ErrorCode_OK || !cm) { wprintf(L"load 0x%08X\n", (unsigned)ec); return 1; }
+    int target = argc > 4 ? _wtoi(argv[4]) : 1500000; IModel* in = nullptr; createModel(&in); ICompositeContainer* cc0 = nullptr; createCompositeContainer(&cc0); cc0->add(cm); in->setCompositeContainer(cc0); IModel* out = nullptr; createModel(&out);
+    wprintf(L"loaded %d points, %d triangles\n", cm->getPoints() ? cm->getPoints()->getSize() : 0, cm->getTriangles() ? cm->getTriangles()->getSize() : 0);
+    alg::FastMeshSimplificationSettings ms; alg::initializeFastMeshSimplificationSettings(&ms, ScannerType_Spider); ms.triangleNumber = target; ms.keepBoundary = true; alg::IAlgorithm* sa = nullptr; ec = alg::createFastMeshSimplificationAlgorithm(&sa, &ms);
+    if (ec == ErrorCode_OK && sa) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = in; ws.out = out; ws.threadsCount = threads(); ec = executeJob(sa, &ws); sa->release(); }
+    ICompositeContainer* sc = out->getCompositeContainer(); if (ec != ErrorCode_OK || !sc || sc->getSize() < 1) { wprintf(L"simplify 0x%08X\n", (unsigned)ec); return 1; }
+    ec = io::Ply::save(argv[3], sc->getElement(0)); wprintf(L"simplified to %d triangles, ply 0x%08X -> %s\n", sc->getElement(0)->getTriangles() ? sc->getElement(0)->getTriangles()->getSize() : 0, (unsigned)ec, argv[3]); return ec == ErrorCode_OK ? 0 : 1; }
+  bool fine = false, global = false, fast = false, fillAll = false, align = false; float res = 0.5f, holeR = 0; std::wstring saveTo; std::wstring outdir = argv[2];
+  for (int i = 3; i < argc; i++) { std::wstring a = argv[i]; if (a == L"--fine") fine = true; else if (a == L"--align") align = true; else if (a == L"--fast") fast = true; else if (a == L"--holer" && i + 1 < argc) holeR = (float)_wtof(argv[++i]); else if (a == L"--fillall") fillAll = true; else if (a == L"--global") global = true; else if (a == L"--res" && i + 1 < argc) res = (float)_wtof(argv[++i]); else if (a == L"--save" && i + 1 < argc) saveTo = argv[++i]; }
   setOutputLevel(VerboseLevel_Error); SHCreateDirectoryExW(nullptr, outdir.c_str(), nullptr);
   if (!alg::checkAlgorithmsPermission()) { wprintf(L"the SDK algorithms are not permitted on this machine\n"); return 1; }
   auto T0 = clk::now();
@@ -71,6 +78,12 @@ int wmain(int argc, wchar_t** argv) {
       if (ec == ErrorCode_OK && out->getSize() == 1 && out->getElement(0)->getSize() == nf) { IScan* r = out->getElement(0); r->setScanTransformation(s->getScanTransformation()); if (s->getName()) r->setName(s->getName()); m->setElement(i, r); wprintf(L"scan %d: fine registration (%s) of %d frames in %.0f s\n", i + 1, allTex ? L"geometry+texture" : L"geometry", nf, secs(t0)); }
       else wprintf(L"scan %d: fine registration failed 0x%08X in %.0f s; kept as it was\n", i + 1, (unsigned)ec, secs(t0));
       in->release(); out->release(); } }
+  // auto-align: place the passes against each other (Studio's Align; ArtecRec's Edit > Auto-align). Field mode leaves
+  // passes where the scanner started them, so this is the step that closes mm-to-cm offsets between passes.
+  if (align && ns >= 2) { IModel* out = nullptr; createModel(&out); alg::AutoAlignSettings as; as.scannerType = st; alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createAutoalignAlgorithm(&a, &as);
+    auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = m; ws.out = out; ws.threadsCount = threads(); ec = executeJob(a, &ws); a->release(); }
+    if (ec == ErrorCode_OK && out->getSize() == ns) { for (int i = 0; i < ns; i++) { const auto& A = m->getElement(i)->getScanTransformation().m; const auto& B = out->getElement(i)->getScanTransformation().m; double d = sqrt((A[0][3] - B[0][3]) * (A[0][3] - B[0][3]) + (A[1][3] - B[1][3]) * (A[1][3] - B[1][3]) + (A[2][3] - B[2][3]) * (A[2][3] - B[2][3])); wprintf(L"auto-align: scan %d moved %.1f mm\n", i + 1, d); IScan* r = out->getElement(i); if (m->getElement(i)->getName()) r->setName(m->getElement(i)->getName()); m->setElement(i, r); } wprintf(L"auto-align of %d scans in %.0f s\n", ns, secs(t0)); }
+    else wprintf(L"auto-align failed 0x%08X in %.0f s; scans kept as they were\n", (unsigned)ec, secs(t0)); out->release(); }
   // global registration of the set
   if (global && ns >= 2) { IModel* out = nullptr; createModel(&out); alg::GlobalRegistrationSettings gs; gs.scannerType = st; gs.registrationType = alg::GlobalRegistrationType_Geometry; alg::IAlgorithm* a = nullptr; ErrorCode ec = alg::createGlobalRegistrationAlgorithm(&a, &gs);
     auto t0 = clk::now(); if (ec == ErrorCode_OK && a) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = m; ws.out = out; ws.threadsCount = threads(); ec = executeJob(a, &ws); a->release(); }
@@ -95,8 +108,8 @@ int wmain(int argc, wchar_t** argv) {
   ICompositeMesh* mesh = cc->getElement(0); int np = mesh->getPoints() ? mesh->getPoints()->getSize() : 0, nt = mesh->getTriangles() ? mesh->getTriangles()->getSize() : 0;
   wprintf(L"fusion (%s, %.2f mm, hole filling up to %.1f mm): %d points, %d triangles in %.0f s\n", fast ? L"fast" : fillAll ? L"sharp, all holes filled" : L"sharp", res, fast ? 0.f : fillAll ? 9999.f : holeR, np, nt, secs(t0));
   Holes h = holeStats(mesh);
-  wprintf(L"RESULT %s%s: boundary loops %d (holes ~%d), boundary edges %lld, total rim length %.0f mm, largest loop %.0f mm; loops under 6 mm %d, 6-25 mm %d, over 25 mm %d\n", fine ? L"fine " : L"raw ", global ? L"+global" : L"", h.loops, std::max(0, h.loops - 1), h.boundaryEdges, h.totalLen, h.largest, h.nSmall, h.nMedium, h.nLarge);
-  std::wstring ply = outdir + L"\\fused-" + (fast ? L"fast-" : L"") + (fine ? L"fine" : L"raw") + (global ? L"-global" : L"") + L".ply"; ec = io::Ply::save(ply.c_str(), mesh); wprintf(L"ply 0x%08X -> %s\n", (unsigned)ec, ply.c_str());
+  wprintf(L"RESULT %s%s%s: boundary loops %d (holes ~%d), boundary edges %lld, total rim length %.0f mm, largest loop %.0f mm; loops under 6 mm %d, 6-25 mm %d, over 25 mm %d\n", fine ? L"fine " : L"raw ", align ? L"+align" : L"", global ? L"+global" : L"", h.loops, std::max(0, h.loops - 1), h.boundaryEdges, h.totalLen, h.largest, h.nSmall, h.nMedium, h.nLarge);
+  std::wstring ply = outdir + L"\\fused-" + (fast ? L"fast-" : L"") + (fine ? L"fine" : L"raw") + (align ? L"-align" : L"") + (global ? L"-global" : L"") + L".ply"; ec = io::Ply::save(ply.c_str(), mesh); wprintf(L"ply 0x%08X -> %s\n", (unsigned)ec, ply.c_str());
   // a lighter copy for viewing (about 1.5 M triangles)
   if (nt > 2000000) { IModel* small2 = nullptr; createModel(&small2); alg::FastMeshSimplificationSettings ms; alg::initializeFastMeshSimplificationSettings(&ms, st); ms.triangleNumber = 1500000; ms.keepBoundary = true; alg::IAlgorithm* sa = nullptr; ErrorCode e2 = alg::createFastMeshSimplificationAlgorithm(&sa, &ms); auto t1 = clk::now();
     if (e2 == ErrorCode_OK && sa) { AlgorithmWorkset ws; memset(&ws, 0, sizeof ws); ws.in = fused; ws.out = small2; ws.threadsCount = threads(); e2 = executeJob(sa, &ws); sa->release(); }
