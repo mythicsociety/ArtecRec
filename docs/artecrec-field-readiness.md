@@ -192,3 +192,6 @@ benchmark. Unit 66/0, system 20/1 (the known 2.5 s cancel stall, lab-mode only),
 Owner: "ok you close and install." The stray 23:59 instance was closed (its recovery question unanswered; both autosave
 folders intact: 20261106-163434, 20261107-112323). Previous exe kept as artecrec.exe.prev. Not launched: nobody at the
 laptop; the Trail31 recovery question will show at the next start. Lab recipe posted to Support with pictures.
+12:25: Trail31_full built on the laptop with sdk-fps/mergeproj (Trail31's 5 scans + the 5 autosaved passes of
+20261107-112323; 10 scans, 8.1 GB, 529 s). The recovery dialog only ever offered the oldest autosave folder (fixed in
+810b6e3, built 12:09, not yet installed). The laptop's SDK DLLs live in D:\ArtecRec (no Program Files SDK there).
