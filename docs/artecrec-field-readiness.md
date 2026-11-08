@@ -179,3 +179,11 @@ Studio the Trail31 scans are complete. They are photo gaps between sparse textur
 Studio. Lab recipe: Fine -> Auto-align -> Global -> Fusion -> Texture (+ inpainting). Owner ran it on Kittayya/Studio
 on Trail31 (fine 235 s, auto-align 265 s converged). To do in ArtecRec: texture-frame coverage (more photos, or a
 coverage view), and "Prepare passes for the lab" (fine + auto-align + global in one click).
+
+### 8 Nov 09:48 — scan-and-save build READY on the hub (0ca20da, not installed)
+Owner: "on the field they will only scan and save"; "they are familiar with terms such as autoalign and tracking";
+"the colours in those images are not natural". So: no renaming, no false colours, screens as before. Removed from the
+field build: the Edit menu (auto-align / global registration / cancel / field-mode switch), the FIELD MODE label, the
+Settings item "After tracking loss: search for position". Field mode is simply always on. The live join box moved
+under Advanced, off by default. Lab mode (--lab; also --process-test, --replay-bench) keeps everything for tests and the
+benchmark. Unit 66/0, system 20/1 (the known 2.5 s cancel stall, lab-mode only), field-mode-check 7/7, loss-check 5/5.
