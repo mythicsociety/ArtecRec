@@ -1,0 +1,72 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Rim click</title>
+<style>
+ body{margin:0;font:15px system-ui,sans-serif;background:#2b2b2b;color:#eee;display:flex;height:100vh}
+ #side{width:300px;padding:14px;box-sizing:border-box;background:#1e1e1e;overflow:auto}
+ #view{flex:1;position:relative} canvas{display:block}
+ button{font:15px system-ui;padding:8px 12px;margin:4px 4px 4px 0;border:0;border-radius:6px;cursor:pointer;background:#555;color:#fff}
+ button.ok{background:#2e7d32} button.warn{background:#b26a00} button:disabled{opacity:.4}
+ #list{max-height:38vh;overflow:auto;border:1px solid #444;border-radius:6px;margin:8px 0}
+ #list div{padding:4px 8px;cursor:pointer} #list div.cur{background:#365} #list div.done{color:#8c8}
+ #msg{min-height:3.4em;line-height:1.35} .big{font-size:22px;font-weight:600}
+ #hint{position:absolute;left:12px;top:10px;background:rgba(0,0,0,.55);padding:8px 12px;border-radius:6px}
+</style></head><body>
+<div id="side">
+ <div class="big">Rim click</div>
+ <div style="color:#aaa;margin:6px 0 10px">Turn the sherd with the mouse. Click <b>three points on the rim top</b>, as far apart as you can. Check the red circle and the yellow axis, then Accept.</div>
+ <div id="list"></div>
+ <div id="msg">Loading…</div>
+ <div id="res"></div>
+ <button id="accept" class="ok" disabled>Accept &amp; save</button>
+ <button id="retry" disabled>Clear clicks</button> <button id="flip" disabled>Flip up/down</button><br>
+ <button id="skip" class="warn">No rim on this piece (skip)</button>
+ <div style="color:#888;margin-top:14px;font-size:13px">Keys: N next, P previous. White dots = your clicks. Green = rim surface used. Red ring = rim circle. Yellow line = vessel axis, arrow = up.</div>
+</div>
+<div id="view"><div id="hint">Click 3 points on the rim top</div></div>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three'; import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+const view=document.getElementById('view'), msg=document.getElementById('msg'), res=document.getElementById('res'), listEl=document.getElementById('list');
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x2b2b2b);
+const cam=new THREE.PerspectiveCamera(40,1,1,5000); const ren=new THREE.WebGLRenderer({antialias:true}); view.appendChild(ren.domElement);
+const ctl=new OrbitControls(cam,ren.domElement); ctl.enableDamping=true;
+scene.add(new THREE.HemisphereLight(0xffffff,0x444444,1.1)); const dl=new THREE.DirectionalLight(0xffffff,1.2); dl.position.set(1,2,3); scene.add(dl);
+function resize(){const w=view.clientWidth,h=view.clientHeight;ren.setSize(w,h);cam.aspect=w/h;cam.updateProjectionMatrix()} window.addEventListener('resize',resize);resize();
+let list=[],cur=-1,mesh=null,geo=null,overlay=new THREE.Group(),marks=new THREE.Group(),lastFit=null,F=null,busy=false,clicks=[]; scene.add(overlay); scene.add(marks);
+async function loadList(){list=await (await fetch('/list')).json(); listEl.innerHTML=''; list.forEach((m,k)=>{const d=document.createElement('div');d.textContent=m.name;d.className=m.done?'done':'';d.onclick=()=>open(k);listEl.appendChild(d)});
+ const first=list.findIndex(m=>!m.done); open(first<0?0:first)}
+function setButtons(fit){document.getElementById('accept').disabled=!fit;document.getElementById('flip').disabled=!fit;document.getElementById('retry').disabled=!(fit||clicks.length)}
+async function open(k){if(busy)return; cur=k; [...listEl.children].forEach((d,i)=>d.classList.toggle('cur',i===k)); listEl.children[k]?.scrollIntoView({block:'nearest'});
+ msg.textContent='Loading '+list[k].name+' …'; res.textContent=''; clicks=[]; marks.clear(); setButtons(null); lastFit=null; overlay.clear(); if(mesh){scene.remove(mesh)}
+ const buf=await (await fetch('/mesh/'+list[k].i)).arrayBuffer(); const hdr=new Uint32Array(buf,0,2); const nv=hdr[0],nf=hdr[1];
+ const V=new Float32Array(buf,8,nv*3); F=new Uint32Array(buf,8+nv*12,nf*3);
+ geo=new THREE.BufferGeometry(); geo.setAttribute('position',new THREE.BufferAttribute(V,3)); geo.setIndex(new THREE.BufferAttribute(F,1)); geo.computeVertexNormals();
+ const col=new Float32Array(nv*3).fill(0.78); geo.setAttribute('color',new THREE.BufferAttribute(col,3));
+ mesh=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({vertexColors:true,roughness:0.85,metalness:0,side:THREE.DoubleSide})); scene.add(mesh);
+ geo.computeBoundingSphere(); const s=geo.boundingSphere; ctl.target.copy(s.center); cam.position.copy(s.center).add(new THREE.Vector3(0,0,s.radius*3.2)); cam.near=s.radius*0.05; cam.far=s.radius*50; cam.updateProjectionMatrix();
+ msg.textContent=list[k].name+(list[k].done?' (already done; click to redo)':'')+': click 3 points on the rim top.'}
+function colour(lipIdx){const c=geo.getAttribute('color'); c.array.fill(0.78); for(const f of lipIdx){for(let k=0;k<3;k++){const v=F[f*3+k];c.array[v*3]=0.25;c.array[v*3+1]=0.75;c.array[v*3+2]=0.35}} c.needsUpdate=true}
+function drawFit(r){overlay.clear(); const ctr=new THREE.Vector3(...r.centre), up=new THREE.Vector3(...r.up).normalize();
+ const ring=new THREE.Mesh(new THREE.TorusGeometry(r.radius,Math.max(0.4,r.radius*0.012),8,128),new THREE.MeshBasicMaterial({color:0xff3b30})); ring.position.copy(ctr); ring.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,1),up); overlay.add(ring);
+ const L=Math.max(r.radius*1.5,40); const ax=new THREE.Line(new THREE.BufferGeometry().setFromPoints([ctr.clone().addScaledVector(up,-L),ctr.clone().addScaledVector(up,L)]),new THREE.LineBasicMaterial({color:0xffd60a})); overlay.add(ax);
+ const tip=new THREE.Mesh(new THREE.ConeGeometry(Math.max(1,r.radius*0.05),Math.max(3,r.radius*0.15),16),new THREE.MeshBasicMaterial({color:0xffd60a})); tip.position.copy(ctr).addScaledVector(up,L); tip.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),up); overlay.add(tip)}
+const ray=new THREE.Raycaster(), ptr=new THREE.Vector2(); let down=null;
+ren.domElement.addEventListener('pointerdown',e=>{down=[e.clientX,e.clientY]});
+ren.domElement.addEventListener('pointerup',async e=>{if(!down||!mesh||busy)return; const moved=Math.hypot(e.clientX-down[0],e.clientY-down[1]); down=null; if(moved>4)return;
+ const rct=ren.domElement.getBoundingClientRect(); ptr.set(((e.clientX-rct.left)/rct.width)*2-1,-((e.clientY-rct.top)/rct.height)*2+1); ray.setFromCamera(ptr,cam); const hit=ray.intersectObject(mesh)[0]; if(!hit)return;
+ if(lastFit){return}
+ clicks.push([hit.point.x,hit.point.y,hit.point.z]); const sr=geo.boundingSphere.radius; const dot=new THREE.Mesh(new THREE.SphereGeometry(sr*0.02,16,12),new THREE.MeshBasicMaterial({color:0xffffff})); dot.position.copy(hit.point); marks.add(dot); setButtons(null);
+ if(clicks.length<3){msg.textContent='Point '+clicks.length+' of 3 taken. '+(3-clicks.length)+' more on the rim top, further along.'; return}
+ busy=true; msg.textContent='Fitting the rim …';
+ const r=await (await fetch('/fit',{method:'POST',body:JSON.stringify({i:list[cur].i,points:clicks})})).json(); busy=false;
+ if(r.error){msg.textContent=r.error; res.textContent=''; clicks=[]; marks.clear(); return}
+ lastFit=r; colour(r.lip); drawFit(r); const q={good:'Looks good.',check:'Please check the circle and axis carefully.',poor:'Poor fit. Clear and click again on a cleaner stretch of rim, or skip.'}[r.quality];
+ msg.innerHTML='<b>'+q+'</b>'+(r.note?'<br>'+r.note:''); res.innerHTML='Rim diameter <b>'+r.diameter.toFixed(0)+' mm</b><br>Rim present: '+r.arcDeg.toFixed(0)+'° of the circle<br>Surface fit error: '+r.residual.toFixed(1)+' mm'; setButtons(r)});
+document.getElementById('accept').onclick=async()=>{if(!lastFit)return; const a=await (await fetch('/accept',{method:'POST',body:JSON.stringify({i:list[cur].i,result:lastFit})})).json(); list[cur].done=true; listEl.children[cur].classList.add('done'); msg.textContent='Saved '+a.saved+'. Next piece…'; setTimeout(next,600)};
+document.getElementById('retry').onclick=()=>{overlay.clear(); marks.clear(); clicks=[]; colour([]); lastFit=null; setButtons(null); msg.textContent='Click 3 points on the rim top.'; res.textContent=''};
+document.getElementById('flip').onclick=()=>{if(!lastFit)return; lastFit.up=lastFit.up.map(x=>-x); drawFit(lastFit); msg.textContent='Up direction flipped.'};
+document.getElementById('skip').onclick=async()=>{await fetch('/skip',{method:'POST',body:JSON.stringify({i:list[cur].i,reason:'no rim'})}); list[cur].done=true; listEl.children[cur].classList.add('done'); next()};
+function next(){const k=list.findIndex((m,i)=>i>cur&&!m.done); open(k<0?Math.min(cur+1,list.length-1):k)}
+window.addEventListener('keydown',e=>{if(e.key==='n'||e.key==='N')next(); if(e.key==='p'||e.key==='P')open(Math.max(cur-1,0))});
+(function loop(){requestAnimationFrame(loop);ctl.update();ren.render(scene,cam)})(); loadList();
+</script></body></html>
