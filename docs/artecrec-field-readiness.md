@@ -187,3 +187,8 @@ field build: the Edit menu (auto-align / global registration / cancel / field-mo
 Settings item "After tracking loss: search for position". Field mode is simply always on. The live join box moved
 under Advanced, off by default. Lab mode (--lab; also --process-test, --replay-bench) keeps everything for tests and the
 benchmark. Unit 66/0, system 20/1 (the known 2.5 s cancel stall, lab-mode only), field-mode-check 7/7, loss-check 5/5.
+
+### 8 Nov 12:15 — INSTALLED on the laptop: scan-and-save build 0ca20da, MD5 1c2f5295cbe721bc5541a1545de9f0d7 (769,536 bytes)
+Owner: "ok you close and install." The stray 23:59 instance was closed (its recovery question unanswered; both autosave
+folders intact: 20261106-163434, 20261107-112323). Previous exe kept as artecrec.exe.prev. Not launched: nobody at the
+laptop; the Trail31 recovery question will show at the next start. Lab recipe posted to Support with pictures.
