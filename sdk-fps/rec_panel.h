@@ -90,7 +90,7 @@ static void create(HWND parent, HFONT f, HFONT fb, HFONT fs, const wchar_t* scan
   lTrack = mk(L"STATIC", L"Features to track", SS_LEFT); rGeoTex = mk(L"BUTTON", L"Geometry + Texture", BS_AUTORADIOBUTTON | WS_GROUP); rGeo = mk(L"BUTTON", L"Geometry", BS_AUTORADIOBUTTON); rTargets = mk(L"BUTTON", L"Targets   (not available in the SDK)", BS_AUTORADIOBUTTON);
   SendMessageW(rGeoTex, BM_SETCHECK, BST_CHECKED, 0); EnableWindow(rTargets, FALSE);
   cDist = mk(L"BUTTON", L"Show distance color", BS_AUTOCHECKBOX | WS_GROUP); SendMessageW(cDist, BM_SETCHECK, BST_CHECKED, 0);
-  cAlign = mk(L"BUTTON", L"Auto-align new scans while scanning (optional; passes are placed in Studio)", BS_AUTOCHECKBOX); SendMessageW(cAlign, BM_SETCHECK, BST_UNCHECKED, 0);   // 8 Nov (owner): off by default, under Advanced
+  cAlign = mk(L"BUTTON", L"Auto-align new scans while scanning (optional)", BS_AUTOCHECKBOX); SendMessageW(cAlign, BM_SETCHECK, BST_UNCHECKED, 0);   // 8 Nov (owner): off by default, under Advanced
   cBase = mk(L"BUTTON", L"Enable automatic base removal   (not in the SDK)", BS_AUTOCHECKBOX); EnableWindow(cBase, FALSE);
   cFusion = mk(L"BUTTON", L"Real-time fusion   (not in the SDK)", BS_AUTOCHECKBOX); EnableWindow(cFusion, FALSE);
   cRtp = mk(L"BUTTON", L"Enable real-time processing   (always on)", BS_AUTOCHECKBOX); SendMessageW(cRtp, BM_SETCHECK, BST_CHECKED, 0); EnableWindow(cRtp, FALSE);
